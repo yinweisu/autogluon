@@ -1,0 +1,32 @@
+name: Cloud Continuous Integration
+
+on:
+  push:
+    # paths:
+    #   - 'cloud/**'
+  pull_request_target:
+    # paths:
+    #   - 'cloud/**'
+
+permissions:
+  id-token: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test_tabular_cloud:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: arn:aws:iam::369469875935:role/AutoGluonCloudCIRole
+          role-duration-seconds: 7200
+          aws-region: us-east-1
+      - name: Test Tabular Cloud
+        run: |
+          chmod +x ./.github/workflow_scripts/test_tabular_cloud.sh && ./.github/workflow_scripts/test_tabular_cloud.sh
