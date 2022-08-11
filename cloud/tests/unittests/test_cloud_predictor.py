@@ -81,8 +81,8 @@ def test_tabular():
             tuning_data=tune_data,
             time_limit=time_limit,
         )
-        cloud_predictor = TabularCloudPredictor(cloud_output_path='s3://ag-cloud-predictor/test-tabular', local_output_path='test_tabular_cloud_predictor')
-        cloud_predictor_no_train = TabularCloudPredictor(cloud_output_path='s3://ag-cloud-predictor/test-tabular-no-train', local_output_path='test_tabular_cloud_predictor_no_train')
+        cloud_predictor = TabularCloudPredictor(cloud_output_path='s3://autogluon-cloud-ci/test-tabular', local_output_path='test_tabular_cloud_predictor')
+        cloud_predictor_no_train = TabularCloudPredictor(cloud_output_path='s3://autogluon-cloud-ci/test-tabular-no-train', local_output_path='test_tabular_cloud_predictor_no_train')
         _test_functionality(cloud_predictor, predictor_init_args, predictor_fit_args, cloud_predictor_no_train, test_data)
 
 
@@ -104,8 +104,8 @@ def test_text():
             tuning_data=tune_data,
             time_limit=time_limit
         )
-        cloud_predictor = TextCloudPredictor(cloud_output_path='s3://ag-cloud-predictor/test-text', local_output_path='test_text_cloud_predictor')
-        cloud_predictor_no_train = TextCloudPredictor(cloud_output_path='s3://ag-cloud-predictor/test-text-no-train', local_output_path='test_text_cloud_predictor_no_train')
+        cloud_predictor = TextCloudPredictor(cloud_output_path='s3://autogluon-cloud-ci/test-text', local_output_path='test_text_cloud_predictor')
+        cloud_predictor_no_train = TextCloudPredictor(cloud_output_path='s3://autogluon-cloud-ci/test-text-no-train', local_output_path='test_text_cloud_predictor_no_train')
         _test_functionality(cloud_predictor, predictor_init_args, predictor_fit_args, cloud_predictor_no_train, test_data, fit_instance_type='ml.g4dn.2xlarge')
 
 
