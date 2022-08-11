@@ -23,7 +23,7 @@ install_requires = [
     'numpy',
     'opencv-python>=4.6,<4.7'
     'pandas',
-    'sagemaker>=2.94',
+    'sagemaker>=2.94,<=2.101.1',
     'pyarrow>=9.0'
 ]
 
