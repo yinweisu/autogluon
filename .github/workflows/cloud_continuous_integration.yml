@@ -4,7 +4,9 @@ on:
   push:
     # paths:
     #   - 'cloud/**'
+  pull_request:
   pull_request_target:
+    types: [labeled]
     # paths:
     #   - 'cloud/**'
 
@@ -16,11 +18,30 @@ defaults:
     shell: bash
 
 jobs:
+  permission_check:
+    runs-on: ubuntu
+    steps:
+      - name: Check PR Safe to Run
+        if: ${{ github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'cloud safe to test') == false }}
+        run: exit 1
+      - name: Remove Safe to Test Label  # One commit is safe doesn't mean the next commit is safe.
+        if: ${{ github.event_name == 'pull_request_target' }}
+        uses: actions-ecosystem/action-remove-labels@v1.3.0
+        with:
+          labels: 'cloud safe to test'
   test_tabular_cloud:
+    needs: permission_check
     runs-on: ubuntu-latest
     steps:
+
       - name: Checkout repository
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
         uses: actions/checkout@v2
+      - name: Checkout repository(Pull Request Target)
+        if: ${{ github.event_name == 'pull_request_target' }}
+        uses: actions/checkout@v2
+        with:
+          ref: "refs/pull/${{ github.event.number }}/merge"
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
