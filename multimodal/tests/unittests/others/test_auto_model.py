@@ -6,7 +6,10 @@ from autogluon.multimodal.models import (
     HFAutoModelForTextPrediction,
     NumericalTransformer,
     TimmAutoModelForImagePrediction,
+    
 )
+
+
 
 
 @pytest.mark.parametrize(
