@@ -9,6 +9,7 @@ from autogluon.multimodal.models import (
 )
 
 
+
 @pytest.mark.parametrize(
     "checkpoint_name",
     [
