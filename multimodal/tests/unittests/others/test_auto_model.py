@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+
 from autogluon.multimodal.constants import FEATURES, LOGITS
 from autogluon.multimodal.models import (
     HFAutoModelForTextPrediction,
