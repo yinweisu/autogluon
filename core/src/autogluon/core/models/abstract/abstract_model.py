@@ -966,7 +966,16 @@ class AbstractModel:
         else:
             y_pred = y_pred_proba
         return compute_weighted_metric(y, y_pred, metric, sample_weight, quantile_levels=self.quantile_levels)
-
+    
+    def _save_model_with_comipler(self, path: str):
+        if self.model is not None:
+            if self._compiler is None:
+                self._compiler = self._get_compiler()
+                if self._compiler is not None and not self._compiler.save_in_pkl:
+                    self._compiler.save(model=self.model, path=path)
+            if self._compiler is not None and not self._compiler.save_in_pkl:
+                self.model = None  # Don't save model in pkl
+                
     def save(self, path: str = None, verbose=True) -> str:
         """
         Saves the model to disk.
@@ -991,13 +1000,7 @@ class AbstractModel:
             path = self.path
         file_path = path + self.model_file_name
         _model = self.model
-        if self.model is not None:
-            if self._compiler is None:
-                self._compiler = self._get_compiler()
-                if self._compiler is not None and not self._compiler.save_in_pkl:
-                    self._compiler.save(model=self.model, path=path)
-            if self._compiler is not None and not self._compiler.save_in_pkl:
-                self.model = None  # Don't save model in pkl
+        self._save_model_with_comipler(path=path)
         save_pkl.save(path=file_path, object=self, verbose=verbose)
         self.model = _model
         return path

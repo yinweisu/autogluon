@@ -36,6 +36,7 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
     # Constants used throughout this class:
     unique_category_str = np.nan  # string used to represent missing values and unknown categories for categorical features.
     temp_file_name = 'temp_model.pt'  # Stores temporary network parameters (eg. during the course of training)
+    network_file_name = "_model.pt"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -80,14 +81,15 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
         else:
             raise ValueError(f'Unknown problem_type: {self.problem_type}')
 
-    def _get_device(self, num_gpus):
+    @classmethod
+    def _get_device(cls, num_gpus):
         import torch
         if num_gpus is not None and num_gpus >= 1:
             if torch.cuda.is_available():
                 device = torch.device("cuda")
                 logger.log(15, "Training on GPU")
                 if num_gpus > 1:
-                    logger.warning(f"{self.__class__.__name__} not yet able to use more than 1 GPU. 'num_gpus' is set to >1, but we will be using only 1 GPU.")
+                    logger.warning(f"{cls.__name__} not yet able to use more than 1 GPU. 'num_gpus' is set to >1, but we will be using only 1 GPU.")
             else:
                 device = torch.device("cpu")
                 logger.log(15, "Training on CPU")
@@ -561,17 +563,23 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
         num_cpus = ResourceManager.get_cpu_count_psutil(logical=False)
         num_gpus = 0
         return num_cpus, num_gpus
-
-    def save(self, path: str = None, verbose=True) -> str:
+    
+    def save(self, path = None, verbose=True):
         import torch
-        # Save on CPU to ensure the model can be loaded on a box without GPU
+        if path is None:
+            path = self.path
+        file_path = path + self.network_file_name
+        _model = self.model
+        self._save_model_with_comipler(path=path)
         if self.model is not None:
-            self.model = self.model.to(torch.device("cpu"))
-        path = super().save(path, verbose)
-        # Put the model back to the device after the save
-        if self.model is not None:
-            self.model.to(self.device)
-        return path
+            # Directly saving network with pickle would cause issue when doing cross device loading.
+            # Save the network with torch.save instead
+            torch.save(self.model, file_path)
+            self.model = None
+        # network won't be saved by super class as model is None now
+        ret = super().save(path, verbose=verbose)
+        self.model = _model
+        return ret
 
     @classmethod
     def load(cls, path: str, reset_paths=True, verbose=True):
@@ -602,27 +610,15 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
         import torch
 
         model: TabularNeuralNetTorchModel = super().load(path=path, reset_paths=reset_paths, verbose=verbose)
-
-        # Put the model on the same device it was train on (GPU/MPS) if it is available; otherwise use CPU
-        if model.model is not None:
-            original_device_type = model.device.type
-            if 'cuda' in original_device_type:
-                # cuda: nvidia GPU
-                device = torch.device(original_device_type if torch.cuda.is_available() else 'cpu')
-            elif 'mps' in original_device_type:
-                # mps: Apple Silicon
-                device = torch.device(original_device_type if torch.backends.mps.is_available() else 'cpu')
-            else:
-                device = torch.device(original_device_type)
-
-            if verbose and (original_device_type != device.type):
-                logger.log(15, f'Model is trained on {original_device_type}, but the device is not available - loading on {device.type}')
-
-            model.device = device
-            model.model = model.model.to(model.device)
-            model.model.device = model.device
-
-        # Compiled models handling
+        import torch
+        file_path = path + cls.network_file_name
+        # TODO: support user specify device during inference
+        device = cls._get_device(num_gpus=ResourceManager.get_gpu_count_torch())
+        if model.model is None:
+            # not loaded by compiler
+            model.model = torch.load(file_path, map_location=device)
+            model.model.device = device
+            model.model.to(device)
         if hasattr(model, '_compiler') and model._compiler and model._compiler.name != 'native':
             model.model.eval()
             model.processor = model._compiler.load(path=model.path)
