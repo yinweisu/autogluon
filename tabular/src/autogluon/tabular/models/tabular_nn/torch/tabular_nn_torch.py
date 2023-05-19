@@ -81,15 +81,14 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
         else:
             raise ValueError(f'Unknown problem_type: {self.problem_type}')
 
-    @classmethod
-    def _get_device(cls, num_gpus):
+    def _get_device(self, num_gpus):
         import torch
         if num_gpus is not None and num_gpus >= 1:
             if torch.cuda.is_available():
                 device = torch.device("cuda")
                 logger.log(15, "Training on GPU")
                 if num_gpus > 1:
-                    logger.warning(f"{cls.__name__} not yet able to use more than 1 GPU. 'num_gpus' is set to >1, but we will be using only 1 GPU.")
+                    logger.warning(f"{self.__class__.__name__} not yet able to use more than 1 GPU. 'num_gpus' is set to >1, but we will be using only 1 GPU.")
             else:
                 device = torch.device("cpu")
                 logger.log(15, "Training on CPU")
@@ -97,6 +96,13 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
             device = torch.device("cpu")
             logger.log(15, "Training on CPU")
         return device
+    
+    def _validate_device(self):
+        import torch
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            self.device = torch.device("cpu")
+            logger.log(15, f"{self.__class__.__name__} trained on GPU but loaded on CPU")
+
 
     def _set_net_defaults(self, train_dataset, params):
         params = params.copy()
