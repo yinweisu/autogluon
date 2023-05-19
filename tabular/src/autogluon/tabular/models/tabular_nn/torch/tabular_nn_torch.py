@@ -103,7 +103,6 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
             self.device = torch.device("cpu")
             logger.log(15, f"{self.__class__.__name__} trained on GPU but loaded on CPU")
 
-
     def _set_net_defaults(self, train_dataset, params):
         params = params.copy()
         y_range_extend = params.pop('y_range_extend', None)
@@ -619,12 +618,12 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
         import torch
         file_path = path + cls.network_file_name
         # TODO: support user specify device during inference
-        device = cls._get_device(num_gpus=ResourceManager.get_gpu_count_torch())
+        model._validate_device()
         if model.model is None:
             # not loaded by compiler
-            model.model = torch.load(file_path, map_location=device)
-            model.model.device = device
-            model.model.to(device)
+            model.model = torch.load(file_path, map_location=model.device)
+            model.model.device = model.device
+            model.model.to(model.device)
         if hasattr(model, '_compiler') and model._compiler and model._compiler.name != 'native':
             model.model.eval()
             model.processor = model._compiler.load(path=model.path)
