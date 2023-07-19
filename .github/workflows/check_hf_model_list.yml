@@ -16,3 +16,4 @@ jobs:
         run: |
           echo It appears that you have modified multimodal unit tests/docs. Please make sure to update `multimodal/tests/hf_model_list.yaml` to include any model changes and tag this PR with `model list checked`.
           exit 1
+
