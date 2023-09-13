@@ -1500,7 +1500,7 @@ class MultiModalPredictor(ExportMixin):
                 devices=num_gpus if num_gpus > 0 else "auto",
                 num_nodes=2,
                 precision=precision,
-                strategy=strategy if strategy else "auto",
+                strategy="fsdp",
                 benchmark=False,
                 deterministic=config.env.deterministic,
                 max_epochs=config.optimization.max_epochs,
