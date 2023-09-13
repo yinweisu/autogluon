@@ -174,7 +174,7 @@ from .utils import (
     upgrade_config,
 )
 
-from lightning.pytorch.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 logger = logging.getLogger(__name__)
 
