@@ -1409,7 +1409,7 @@ class MultiModalPredictor(ExportMixin):
         lr_callback = pl.callbacks.LearningRateMonitor(logging_interval="step")
         model_summary = pl.callbacks.ModelSummary(max_depth=1)
         callbacks = [
-            # checkpoint_callback,
+            checkpoint_callback,
             early_stopping_callback,
             lr_callback,
             model_summary,
