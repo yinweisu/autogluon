@@ -174,6 +174,8 @@ from .utils import (
     upgrade_config,
 )
 
+from lightning.pytorch.callbacks import ModelCheckpoint
+
 logger = logging.getLogger(__name__)
 
 
@@ -1390,7 +1392,7 @@ class MultiModalPredictor(ExportMixin):
         logger.debug(f"validation_metric_name: {task.validation_metric_name}")
         logger.debug(f"minmax_mode: {minmax_mode}")
 
-        checkpoint_callback = AutoMMModelCheckpoint(
+        checkpoint_callback = ModelCheckpoint(
             dirpath=save_path,
             save_top_k=config.optimization.top_k,
             verbose=True,
