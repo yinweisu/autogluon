@@ -1496,7 +1496,7 @@ class MultiModalPredictor(ExportMixin):
             trainer = pl.Trainer(
                 accelerator="gpu" if num_gpus > 0 else "auto",
                 devices=num_gpus if num_gpus > 0 else "auto",
-                num_nodes=config.env.num_nodes,
+                num_nodes=2,
                 precision=precision,
                 strategy=strategy if strategy else "auto",
                 benchmark=False,
