@@ -200,5 +200,5 @@ class AutoMMModelCheckpoint(pl.callbacks.ModelCheckpoint):
         super(AutoMMModelCheckpoint, self)._update_best_and_save(
             current=current, trainer=trainer, monitor_candidates=monitor_candidates
         )
-        if os.environ.get("NODE_RANK", None) == 0:
+        if os.environ.get("NODE_RANK", None) == "0":
             self.to_yaml()
