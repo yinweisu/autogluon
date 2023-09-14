@@ -1392,7 +1392,8 @@ class MultiModalPredictor(ExportMixin):
         logger.debug(f"validation_metric_name: {task.validation_metric_name}")
         logger.debug(f"minmax_mode: {minmax_mode}")
 
-        checkpoint_callback = ModelCheckpoint(
+        # checkpoint_callback = ModelCheckpoint(
+        checkpoint_callback = AutoMMModelCheckpoint(
             dirpath=save_path,
             save_top_k=config.optimization.top_k,
             verbose=True,
@@ -1500,7 +1501,7 @@ class MultiModalPredictor(ExportMixin):
                 devices=num_gpus if num_gpus > 0 else "auto",
                 num_nodes=2,
                 precision=precision,
-                strategy="fsdp",
+                strategy="ddp",
                 benchmark=False,
                 deterministic=config.env.deterministic,
                 max_epochs=config.optimization.max_epochs,
