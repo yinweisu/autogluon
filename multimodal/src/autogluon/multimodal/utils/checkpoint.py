@@ -62,6 +62,11 @@ def average_checkpoints(
         for k in avg_state_dict:
             avg_state_dict[k].clamp_(float32_info.min, float32_info.max).to(dtype=torch.float32)
     else:
+        if os.path.isdir(checkpoint_paths[0] + "-dir"):  # deepspeed save checkpoints into a directory
+            from pytorch_lightning.utilities.deepspeed import convert_zero_checkpoint_to_fp32_state_dict
+
+            convert_zero_checkpoint_to_fp32_state_dict(checkpoint_paths[0] + "-dir", checkpoint_paths[0])
+            shutil.rmtree(checkpoint_paths[0] + "-dir")
         avg_state_dict = torch.load(checkpoint_paths[0], map_location=torch.device("cpu"))["state_dict"]
 
     return avg_state_dict
