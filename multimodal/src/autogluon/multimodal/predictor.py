@@ -1570,7 +1570,7 @@ class MultiModalPredictor(ExportMixin):
             upload_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{os.environ.get('NODE_RANK')}", folder_to_upload="./Multimodal_distributed")
             fname = f"{os.environ.get('NODE_RANK')}.txt"
             open(fname, 'w').close()
-            upload_file(bucket="weisy-personal", prefix=f"multimodal_distributed/finished", file_name=f"./Multimodal_distributed/{fname}")
+            upload_file(bucket="weisy-personal", prefix=f"multimodal_distributed/finished", file_name=f"./{fname}")
             sys.exit(f"Training finished, exit the process with global_rank={trainer.global_rank}...")
 
     def _top_k_average(
