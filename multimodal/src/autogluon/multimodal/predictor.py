@@ -1548,7 +1548,7 @@ class MultiModalPredictor(ExportMixin):
                 while len(list_bucket_prefix_suffix_contains_s3(bucket="weisy-personal", prefix="multimodal_distributed/finished")) < 1:
                     time.sleep(10)
                 from autogluon.common.utils.s3_utils import download_s3_folder
-                for i in int(1, range(os.environ.get("WORLD_SIZE", "0"))):
+                for i in range(1, int(os.environ.get("WORLD_SIZE", "0"))):
                     download_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{i}", local_path="./Multimodal_distributed", error_if_exists=False)
                 self._top_k_average(
                     model=model,
