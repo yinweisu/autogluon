@@ -1545,7 +1545,7 @@ class MultiModalPredictor(ExportMixin):
             if not hpo_mode:
                 from autogluon.common.loaders.load_s3 import list_bucket_prefix_suffix_contains_s3
                 import time
-                while len(list_bucket_prefix_suffix_contains_s3(bucket="weisy-personal", prefix="multimodal_distributed/finished")) < 2:
+                while len(list_bucket_prefix_suffix_contains_s3(bucket="weisy-personal", prefix="multimodal_distributed/finished")) < 1:
                     time.sleep(10)
                 from autogluon.common.utils.s3_utils import download_s3_folder
                 for i in int(1, range(os.environ.get("WORLD_SIZE", "0"))):
