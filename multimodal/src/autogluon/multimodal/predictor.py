@@ -1502,6 +1502,7 @@ class MultiModalPredictor(ExportMixin):
                 num_nodes=2,
                 precision=precision,
                 strategy="deepspeed_stage_2",
+                # strategy="fsdp",
                 benchmark=False,
                 deterministic=config.env.deterministic,
                 max_epochs=config.optimization.max_epochs,
@@ -1542,6 +1543,14 @@ class MultiModalPredictor(ExportMixin):
             # We do not perform averaging checkpoint in the case of hpo for each trial
             # We only average the checkpoint of the best trial at the end in the master process.
             if not hpo_mode:
+                while True:
+                    import time
+                    from autogluon.common.utils.s3_utils import download_s3_folder
+                    try:
+                        download_s3_folder(bucket="weisy-personal", prefix="multimodal_distributed/", local_path="./Multimodal_distributed", error_if_exists=False)
+                        break
+                    except:
+                        time.sleep(10)
                 self._top_k_average(
                     model=model,
                     save_path=save_path,
@@ -1558,6 +1567,8 @@ class MultiModalPredictor(ExportMixin):
                 )
             self._best_score = trainer.callback_metrics[f"val_{self._validation_metric_name}"].item()
         else:
+            from autogluon.common.utils.s3_utils import upload_s3_folder
+            upload_s3_folder(bucket="weisy-personal", prefix="multimodal_distributed", folder_to_upload="./Multimodal_distributed")
             sys.exit(f"Training finished, exit the process with global_rank={trainer.global_rank}...")
 
     def _top_k_average(
