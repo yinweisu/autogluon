@@ -1551,7 +1551,7 @@ class MultiModalPredictor(ExportMixin):
                 print(os.environ.get("WORLD_SIZE", "0"))
                 for i in range(1, 2):
                     print("downloading")
-                    download_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{i}", local_path="./Multimodal_distributed", error_if_exists=False)
+                    download_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{i}/", local_path="./Multimodal_distributed", error_if_exists=False)
                 self._top_k_average(
                     model=model,
                     save_path=save_path,
