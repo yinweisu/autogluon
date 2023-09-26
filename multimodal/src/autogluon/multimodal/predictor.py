@@ -1549,7 +1549,7 @@ class MultiModalPredictor(ExportMixin):
                     time.sleep(10)
                 from autogluon.common.utils.s3_utils import download_s3_folder
                 print(os.environ.get("WORLD_SIZE", "0"))
-                for i in range(1, 8):
+                for i in range(1, 2):
                     print("downloading")
                     download_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{i}/", local_path="./Multimodal_distributed", error_if_exists=False)
                 self._top_k_average(
@@ -1568,11 +1568,12 @@ class MultiModalPredictor(ExportMixin):
                 )
             self._best_score = trainer.callback_metrics[f"val_{self._validation_metric_name}"].item()
         else:
-            from autogluon.common.utils.s3_utils import upload_s3_folder, upload_file
-            upload_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{os.environ.get('NODE_RANK')}", folder_to_upload="./Multimodal_distributed")
-            fname = f"{os.environ.get('NODE_RANK')}.txt"
-            open(fname, 'w').close()
-            upload_file(bucket="weisy-personal", prefix=f"multimodal_distributed/finished", file_name=f"./{fname}")
+            if os.environ.get("NODE_RANK") != "0":
+                from autogluon.common.utils.s3_utils import upload_s3_folder, upload_file
+                upload_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{os.environ.get('NODE_RANK')}", folder_to_upload="./Multimodal_distributed")
+                fname = f"{os.environ.get('NODE_RANK')}.txt"
+                open(fname, 'w').close()
+                upload_file(bucket="weisy-personal", prefix=f"multimodal_distributed/finished", file_name=f"./{fname}")
             sys.exit(f"Training finished, exit the process with global_rank={trainer.global_rank}...")
 
     def _top_k_average(
