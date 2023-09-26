@@ -1501,7 +1501,7 @@ class MultiModalPredictor(ExportMixin):
                 devices=num_gpus if num_gpus > 0 else "auto",
                 num_nodes=2,
                 precision=precision,
-                strategy="deepspeed_stage_3",
+                strategy="deepspeed_stage_2",
                 # strategy="fsdp",
                 benchmark=False,
                 deterministic=config.env.deterministic,
