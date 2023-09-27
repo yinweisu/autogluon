@@ -1501,7 +1501,7 @@ class MultiModalPredictor(ExportMixin):
                 devices=num_gpus if num_gpus > 0 else "auto",
                 num_nodes=2,
                 precision=precision,
-                strategy="deepspeed_stage_3",
+                strategy="deepspeed_stage_3_offload",
                 # strategy="deepspeed_stage_3",
                 # strategy="fsdp",
                 benchmark=False,
@@ -1525,6 +1525,7 @@ class MultiModalPredictor(ExportMixin):
                 else 1,
                 plugins=[custom_checkpoint_plugin],
             )
+            trainer.strategy.config["zero_force_ds_cpu_optimizer"] = False
 
         with warnings.catch_warnings():
             warnings.filterwarnings(
