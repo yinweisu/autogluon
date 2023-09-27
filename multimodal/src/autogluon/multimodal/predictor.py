@@ -1552,6 +1552,13 @@ class MultiModalPredictor(ExportMixin):
                 for i in range(1, 2):
                     print("downloading")
                     download_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{i}/", local_path="./Multimodal_distributed", error_if_exists=False)
+                model = create_fusion_model(
+                    config=config,
+                    num_classes=self._output_shape,
+                    classes=self._classes,
+                    num_numerical_columns=len(df_preprocessor.numerical_feature_names),
+                    num_categories=df_preprocessor.categorical_num_categories,
+                )
                 self._top_k_average(
                     model=model,
                     save_path=save_path,
