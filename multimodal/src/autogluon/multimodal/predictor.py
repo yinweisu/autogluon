@@ -1499,7 +1499,7 @@ class MultiModalPredictor(ExportMixin):
             trainer = pl.Trainer(
                 accelerator="gpu" if num_gpus > 0 else "auto",
                 devices=num_gpus if num_gpus > 0 else "auto",
-                num_nodes=2,
+                num_nodes=3,
                 precision=precision,
                 strategy="deepspeed_stage_3_offload",
                 # strategy="deepspeed_stage_3",
@@ -1547,11 +1547,11 @@ class MultiModalPredictor(ExportMixin):
             if not hpo_mode:
                 from autogluon.common.loaders.load_s3 import list_bucket_prefix_suffix_contains_s3
                 import time
-                while len(list_bucket_prefix_suffix_contains_s3(bucket="weisy-personal", prefix="multimodal_distributed/finished")) < 1:
+                while len(list_bucket_prefix_suffix_contains_s3(bucket="weisy-personal", prefix="multimodal_distributed/finished")) < 2:
                     time.sleep(10)
                 from autogluon.common.utils.s3_utils import download_s3_folder
                 print(os.environ.get("WORLD_SIZE", "0"))
-                for i in range(1, 2):
+                for i in range(1, 3):
                     print("downloading")
                     download_s3_folder(bucket="weisy-personal", prefix=f"multimodal_distributed/{i}/", local_path="./Multimodal_distributed", error_if_exists=False)
                 model = create_fusion_model(
