@@ -11,6 +11,44 @@ from autogluon.timeseries.dataset.ts_dataframe import ITEMID, TIMESTAMP
 
 # TODO: add larger unit test data sets to S3
 
+# List of all supported pandas frequencies, based on https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases
+ALL_PANDAS_FREQUENCIES = {
+    "B",
+    "C",
+    "D",
+    "W",
+    "M",
+    "SM",
+    "BM",
+    "CBM",
+    "MS",
+    "SMS",
+    "BMS",
+    "CBMS",
+    "Q",
+    "BQ",
+    "QS",
+    "BQS",
+    "A",
+    "Y",
+    "BA",
+    "BY",
+    "AS",
+    "YS",
+    "BAS",
+    "BYS",
+    "BH",
+    "H",
+    "T",
+    "min",
+    "S",
+    "L",
+    "ms",
+    "U",
+    "us",
+    "N",
+}
+
 DUMMY_DATASET = ListDataset(
     [
         {
@@ -32,22 +70,31 @@ def get_data_frame_with_item_index(
     item_list: List[Union[str, int]],
     data_length: int = 20,
     freq: str = "H",
+    start_date: str = "2022-01-01",
+    columns: List[str] = ["target"],
+    data_generation: str = "random",
 ):
+    assert data_generation in ["random", "sequential"]
+    if data_generation == "random":
+        data = [random.random() for _ in range(len(item_list) * data_length)]
+    elif data_generation == "sequential":
+        data = [e for e in range(len(item_list) * data_length)]
+
     return TimeSeriesDataFrame(
         pd.DataFrame(
             index=pd.MultiIndex.from_product(
                 [
                     item_list,
                     pd.date_range(
-                        pd.Timestamp("2022-01-01"),  # noqa
+                        pd.Timestamp(start_date),  # noqa
                         freq=freq,
                         periods=data_length,
                     ),
                 ],
                 names=(ITEMID, TIMESTAMP),
             ),
-            data=[random.random() for _ in range(len(item_list) * data_length)],
-            columns=["target"],
+            data=data,
+            columns=columns,
         )
     )
 

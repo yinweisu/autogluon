@@ -15,19 +15,21 @@ import warnings
 from datetime import timedelta
 from typing import Dict, List, Optional, Union
 
+import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
-import pytorch_lightning as pl
 import torch
 import transformers
 import yaml
+from lightning.pytorch.strategies import DeepSpeedStrategy
 from omegaconf import OmegaConf
 from packaging import version
-from pytorch_lightning.strategies import DeepSpeedStrategy
 from torch import nn
 
 from autogluon.common.utils.log_utils import set_logger_verbosity, verbosity2loglevel
 from autogluon.common.utils.resource_utils import ResourceManager
+from autogluon.common.utils.try_import import try_import_ray
+from autogluon.core.metrics import Scorer
 from autogluon.core.utils import default_holdout_frac, generate_train_test_split_combined
 from autogluon.core.utils.loaders import load_pd
 from autogluon.multimodal.utils.log import get_fit_complete_message, get_fit_start_message
@@ -78,6 +80,7 @@ from .constants import (
     SCORE,
     TEXT,
     TEXT_NER,
+    TORCH_COMPILE_MIN_VERSION,
     UNIFORM_SOUP,
     XYWH,
     Y_PRED,
@@ -129,7 +132,6 @@ from .utils import (
     evaluate_coco,
     extract_from_output,
     filter_hyperparameters,
-    get_available_devices,
     get_config,
     get_detection_classes,
     get_dir_ckpt_paths,
@@ -147,6 +149,8 @@ from .utils import (
     infer_precision,
     infer_scarcity_mode_by_data_size,
     init_df_preprocessor,
+    is_interactive_env,
+    is_interactive_strategy,
     is_lazy_weight_tensor,
     list_timm_models,
     load_text_tokenizers,
@@ -171,6 +175,8 @@ from .utils import (
     upgrade_config,
 )
 
+pl_logger = logging.getLogger("lightning")
+pl_logger.propagate = False  # https://github.com/Lightning-AI/lightning/issues/4621
 logger = logging.getLogger(__name__)
 
 
@@ -194,7 +200,7 @@ class MultiModalPredictor(ExportMixin):
         match_label: Optional[Union[int, str]] = None,
         pipeline: Optional[str] = None,
         presets: Optional[str] = None,
-        eval_metric: Optional[str] = None,
+        eval_metric: Optional[Union[str, Scorer]] = None,
         hyperparameters: Optional[dict] = None,
         path: Optional[str] = None,
         verbosity: Optional[int] = 2,
@@ -356,10 +362,17 @@ class MultiModalPredictor(ExportMixin):
 
         check_if_packages_installed(problem_type=problem_type)
 
-        if eval_metric is not None and not isinstance(eval_metric, str):
-            eval_metric = eval_metric.name
+        if isinstance(eval_metric, str):
+            eval_metric_name = eval_metric
+            eval_metric_func = None
+        elif isinstance(eval_metric, Scorer):
+            eval_metric_func = eval_metric
+            eval_metric_name = eval_metric_func.name
+        else:
+            eval_metric_name = None
+            eval_metric_func = None
 
-        if eval_metric is not None and eval_metric.lower() in [
+        if eval_metric is not None and eval_metric_name.lower() in [
             "rmse",
             "r2",
             "pearsonr",
@@ -368,7 +381,7 @@ class MultiModalPredictor(ExportMixin):
             if problem_type is None:
                 logger.debug(
                     f"Infer problem type to be a regression problem "
-                    f"since the evaluation metric is set as {eval_metric}."
+                    f"since the evaluation metric is set as {eval_metric_name}."
                 )
                 problem_type = REGRESSION
             else:
@@ -396,7 +409,8 @@ class MultiModalPredictor(ExportMixin):
         self._label_column = label
         self._problem_type = problem_type
         self._presets = presets.lower() if presets else None
-        self._eval_metric_name = eval_metric.lower() if eval_metric else None
+        self._eval_metric_name = eval_metric_name.lower() if eval_metric else None
+        self._eval_metric_func = eval_metric_func if eval_metric else None
         self._validation_metric_name = validation_metric.lower() if validation_metric else None
         self._output_shape = num_classes
         self._classes = classes
@@ -729,15 +743,15 @@ class MultiModalPredictor(ExportMixin):
             fit_called=fit_called,
         )
 
-        if tuning_data is None:
-            train_data, tuning_data = self._split_train_tuning(
-                data=train_data, holdout_frac=holdout_frac, random_state=seed
-            )
-
         if self._label_column:
             self._problem_type = infer_problem_type(
                 y_train_data=train_data[self._label_column],
                 provided_problem_type=self._problem_type,
+            )
+
+        if tuning_data is None:
+            train_data, tuning_data = self._split_train_tuning(
+                data=train_data, holdout_frac=holdout_frac, random_state=seed
             )
 
         column_types = infer_column_types(
@@ -798,7 +812,9 @@ class MultiModalPredictor(ExportMixin):
             time_limit = timedelta(seconds=time_limit)
 
         # set attributes for saving and prediction
-        self._eval_metric_name = eval_metric_name  # In case eval_metric isn't provided in __init__().
+        self._eval_metric_name = (
+            eval_metric_name if self._eval_metric_name is None else self._eval_metric_name
+        )  # In case eval_metric isn't provided in __init__().
         self._validation_metric_name = validation_metric_name
         self._column_types = column_types
 
@@ -819,6 +835,7 @@ class MultiModalPredictor(ExportMixin):
 
         hpo_mode = True if hyperparameter_tune_kwargs else False
         if hpo_mode:
+            try_import_ray()
             hyperparameters = filter_hyperparameters(
                 hyperparameters=hyperparameters,
                 column_types=column_types,
@@ -937,6 +954,7 @@ class MultiModalPredictor(ExportMixin):
                 model=self._model,
                 advanced_hyperparameters=advanced_hyperparameters,
             )
+        self.update_strategy_by_env()
 
     def _ensure_inference_ready(self):
         if not self._fit_called:
@@ -1147,6 +1165,19 @@ class MultiModalPredictor(ExportMixin):
         else:  # continuing training
             model = self._model
 
+        if OmegaConf.select(config, "env.compile.turn_on", default=False):
+            assert version.parse(torch.__version__) >= version.parse(TORCH_COMPILE_MIN_VERSION), (
+                f"torch.compile requires torch version >= {TORCH_COMPILE_MIN_VERSION}, "
+                f"but torch version {torch.__version__} is detected."
+            )
+            logger.debug("Using torch.compile() in compiling the model.")
+            model = torch.compile(
+                model,
+                mode=OmegaConf.select(config, "env.compile.mode", default="default"),
+                dynamic=OmegaConf.select(config, "env.compile.dynamic", default=True),
+                backend=OmegaConf.select(config, "env.compile.backend", default="inductor"),
+            )
+
         norm_param_names = get_norm_layer_param_names(model)
 
         trainable_param_names = get_trainable_params_efficient_finetune(
@@ -1203,6 +1234,7 @@ class MultiModalPredictor(ExportMixin):
         self._data_processors = data_processors
         self._model = model
         self._model_postprocess_fn = model_postprocess_fn
+        self.update_strategy_by_env()
 
         if max_time == timedelta(seconds=0):
             self._top_k_average(
@@ -1395,8 +1427,9 @@ class MultiModalPredictor(ExportMixin):
         ]
 
         if hpo_mode:
-            from ray.tune.integration.pytorch_lightning import TuneReportCheckpointCallback
+            from .utils.hpo import get_ray_tune_ckpt_callback
 
+            TuneReportCheckpointCallback = get_ray_tune_ckpt_callback()
             tune_report_callback = TuneReportCheckpointCallback(
                 {f"{task.validation_metric_name}": f"{task.validation_metric_name}"},
                 filename=RAY_TUNE_CHECKPOINT,
@@ -1420,7 +1453,13 @@ class MultiModalPredictor(ExportMixin):
         )
 
         num_gpus = compute_num_gpus(config_num_gpus=config.env.num_gpus, strategy=config.env.strategy)
-        logger.info(get_gpu_message(detected_num_gpus=ResourceManager.get_gpu_count_torch(), used_num_gpus=num_gpus))
+        logger.info(
+            get_gpu_message(
+                detected_num_gpus=ResourceManager.get_gpu_count_torch(),
+                used_num_gpus=num_gpus,
+                strategy=config.env.strategy,
+            )
+        )
 
         precision = infer_precision(num_gpus=num_gpus, precision=config.env.precision)
 
@@ -1440,7 +1479,7 @@ class MultiModalPredictor(ExportMixin):
                 if config.env.strategy == DEEPSPEED_OFFLOADING:  # Offloading currently only tested for single GPU
                     assert version.parse(pl.__version__) >= version.parse(
                         DEEPSPEED_MIN_PL_VERSION
-                    ), f"For DeepSpeed Offloading to work reliably you need at least pytorch-lightning version {DEEPSPEED_MIN_PL_VERSION}, however, found {pl.__version__}. Please update your pytorch-lightning version."
+                    ), f"For DeepSpeed Offloading to work reliably you need at least lightning version {DEEPSPEED_MIN_PL_VERSION}, however, found {pl.__version__}. Please update your lightning version."
                     from .optimization.deepspeed import CustomDeepSpeedStrategy
 
                     strategy = CustomDeepSpeedStrategy(
@@ -1470,13 +1509,10 @@ class MultiModalPredictor(ExportMixin):
         with apply_log_filter(log_filter):
             trainer = pl.Trainer(
                 accelerator="gpu" if num_gpus > 0 else "auto",
-                devices=get_available_devices(
-                    num_gpus=num_gpus,
-                    auto_select_gpus=config.env.auto_select_gpus,
-                ),
+                devices=num_gpus if num_gpus > 0 else "auto",
                 num_nodes=config.env.num_nodes,
                 precision=precision,
-                strategy=strategy,
+                strategy=strategy if strategy else "auto",
                 benchmark=False,
                 deterministic=config.env.deterministic,
                 max_epochs=config.optimization.max_epochs,
@@ -1693,10 +1729,11 @@ class MultiModalPredictor(ExportMixin):
         precision: Union[int, str],
         batch_size: int,
         strategy: str,
+        barebones: Optional[bool] = False,
     ) -> List[Dict]:
         if self._config.env.strategy == DEEPSPEED_OFFLOADING and DEEPSPEED_MODULE not in sys.modules:
-            # Need to initialize DeepSpeed and optimizer as currently required in Pytorch-Lighting integration of deepspeed.
-            # TODO: Using optimiation_kwargs for inference is confusing and bad design. Remove as soon as fixed in pytorch-lighting.
+            # Need to initialize DeepSpeed and optimizer as currently required in lightning's integration of deepspeed.
+            # TODO: Using optimiation_kwargs for inference is confusing and bad design. Remove as soon as fixed in lightning.
             from .optimization.deepspeed import CustomDeepSpeedStrategy
 
             strategy = CustomDeepSpeedStrategy(
@@ -1772,21 +1809,23 @@ class MultiModalPredictor(ExportMixin):
             blacklist_msgs.append("HPU available")
             blacklist_msgs.append("select gpus")
             blacklist_msgs.append("LOCAL_RANK")
+            blacklist_msgs.append("Trainer(barebones=True)")
         log_filter = LogFilter(blacklist_msgs)
 
         with apply_log_filter(log_filter):
             evaluator = pl.Trainer(
                 accelerator="gpu" if num_gpus > 0 else "auto",
-                devices=get_available_devices(num_gpus=num_gpus, auto_select_gpus=self._config.env.auto_select_gpus),
+                devices=num_gpus if num_gpus > 0 else "auto",
                 num_nodes=self._config.env.num_nodes,
                 precision=precision,
                 strategy=strategy,
                 benchmark=False,
-                enable_progress_bar=self._enable_progress_bar,
+                enable_progress_bar=False if barebones else self._enable_progress_bar,
                 deterministic=self._config.env.deterministic,
                 max_epochs=-1,  # Add max_epochs to disable warning
                 logger=False,
                 callbacks=callbacks,
+                barebones=barebones,
             )
 
             with warnings.catch_warnings():
@@ -2030,15 +2069,18 @@ class MultiModalPredictor(ExportMixin):
 
         if metrics is None:
             metrics_is_none = True
-            metrics = [self._eval_metric_name]
-        if isinstance(metrics, str):
+            if self._eval_metric_func:
+                metrics = [self._eval_metric_func]
+            else:
+                metrics = [self._eval_metric_name]
+        if isinstance(metrics, str) or isinstance(metrics, Scorer):
             metrics = [metrics]
 
         results = {}
         if self._problem_type == NER:
             score = compute_score(
                 metric_data=metric_data,
-                metric_name=self._eval_metric_name.lower(),
+                metric=self._eval_metric_name.lower(),
             )
             score = {k.lower(): v for k, v in score.items()}
             if metrics_is_none:
@@ -2055,9 +2097,10 @@ class MultiModalPredictor(ExportMixin):
             for per_metric in metrics:
                 score = compute_score(
                     metric_data=metric_data,
-                    metric_name=per_metric.lower(),
+                    metric=per_metric.lower() if isinstance(per_metric, str) else per_metric,
                 )
-                results[per_metric] = score
+                per_metric_name = per_metric if isinstance(per_metric, str) else per_metric.name
+                results[per_metric_name] = score
 
         if return_pred:
             return results, self._as_pandas(data=data, to_be_converted=y_pred_inv)
@@ -2441,7 +2484,7 @@ class MultiModalPredictor(ExportMixin):
     ):
         if state_dict is None:
             if os.path.isdir(path + "-dir"):  # deepspeed save checkpoints into a directory
-                from pytorch_lightning.utilities.deepspeed import convert_zero_checkpoint_to_fp32_state_dict
+                from lightning.pytorch.utilities.deepspeed import convert_zero_checkpoint_to_fp32_state_dict
 
                 convert_zero_checkpoint_to_fp32_state_dict(path + "-dir", path)
                 shutil.rmtree(path + "-dir")
@@ -2750,6 +2793,7 @@ class MultiModalPredictor(ExportMixin):
             loss_func=loss_func,
         )
         predictor._model_postprocess_fn = model_postprocess_fn
+        predictor.update_strategy_by_env()
 
         return predictor
 
@@ -2854,12 +2898,12 @@ class MultiModalPredictor(ExportMixin):
         else:
             raise ValueError(f"list_supported_models() is not available for problem type: {self._problem_type}")
 
-
-class AutoMMPredictor(MultiModalPredictor):
-    def __init__(self, **kwargs):
-        warnings.warn(
-            "AutoMMPredictor has been renamed as 'MultiModalPredictor'. "
-            "Consider to use MultiModalPredictor instead. Using AutoMMPredictor will "
-            "raise an exception starting in v0.7."
-        )
-        super(AutoMMPredictor, self).__init__(**kwargs)
+    def update_strategy_by_env(self):
+        """
+        Set strategy to ddp_fork or ddp_notebook if an iterative env is detected.
+        """
+        assert self._config is not None
+        if is_interactive_env() and not is_interactive_strategy(self._config.env.strategy):
+            strs = list(self._config.env.strategy.partition("_find_unused_parameters"))
+            strs[0] = "ddp_fork"
+            self._config.env.strategy = "".join(strs)

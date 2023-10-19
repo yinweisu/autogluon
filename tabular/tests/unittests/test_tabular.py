@@ -21,6 +21,7 @@
 """
 import os
 import shutil
+import sys
 import tempfile
 import warnings
 from random import seed
@@ -34,9 +35,11 @@ from autogluon.common import space
 from autogluon.core.constants import BINARY, MULTICLASS, PROBLEM_TYPES_CLASSIFICATION, QUANTILE, REGRESSION
 from autogluon.core.utils import download, unzip
 from autogluon.tabular import TabularDataset, TabularPredictor
+from autogluon.tabular.configs.hyperparameter_configs import get_hyperparameter_config
 
 PARALLEL_LOCAL_BAGGING = "parallel_local"
 SEQUENTIAL_LOCAL_BAGGING = "sequential_local"
+on_windows = os.name == "nt"
 
 
 def test_tabular():
@@ -46,7 +49,7 @@ def test_tabular():
     subsample_size = None
     hyperparameter_tune_kwargs = None
     verbosity = 2  # how much output to print
-    hyperparameters = None
+    hyperparameters = get_hyperparameter_config("default")
     time_limit = None
     fast_benchmark = True  # False
     # If True, run a faster benchmark (subsample training sets, less epochs, etc),
@@ -57,6 +60,10 @@ def test_tabular():
     if fast_benchmark:
         subsample_size = 100
         time_limit = 60
+
+    # Catboost > 1.2 is required for python 3.11 but cannot be correctly installed on macos
+    if sys.version_info >= (3, 11) and sys.platform == "darwin":
+        hyperparameters.pop("CAT")
 
     fit_args = {"verbosity": verbosity}
     if hyperparameter_tune_kwargs is not None:
@@ -137,7 +144,8 @@ def test_advanced_functionality():
     savedir_predictor_original = savedir + "predictor/"
     predictor: TabularPredictor = TabularPredictor(label=label, path=savedir_predictor_original).fit(train_data)
     leaderboard = predictor.leaderboard(data=test_data)
-    predictor.plot_ensemble_model()
+    if not on_windows:
+        predictor.plot_ensemble_model()
     extra_metrics = ["accuracy", "roc_auc", "log_loss"]
     test_data_no_label = test_data.drop(columns=[label])
     with pytest.raises(ValueError):
@@ -247,7 +255,8 @@ def test_advanced_functionality():
 
     assert predictor.get_model_full_dict() == dict()
     predictor.refit_full()
-    predictor.plot_ensemble_model()
+    if not on_windows:
+        predictor.plot_ensemble_model()
     assert len(predictor.get_model_full_dict()) == num_models
     assert len(predictor.get_model_names()) == num_models * 2
     for model in predictor.get_model_names():
@@ -385,7 +394,7 @@ def run_tabular_benchmark_toy(fit_args):
     savedir = directory + "AutogluonOutput/"
     shutil.rmtree(savedir, ignore_errors=True)  # Delete AutoGluon output directory to ensure previous runs' information has been removed.
     predictor = TabularPredictor(label=dataset["label"], path=savedir).fit(train_data, **fit_args)
-    assert len(predictor._trainer._models_failed_to_train) == 0
+    assert len(predictor._trainer._models_failed_to_train_errors.keys()) == 0
     print(predictor.feature_metadata)
     print(predictor.feature_metadata.type_map_raw)
     print(predictor.feature_metadata.type_group_map_special)
@@ -482,7 +491,7 @@ def run_tabular_benchmarks(fast_benchmark, subsample_size, perf_threshold, seed_
                     # .sample instead of .head to increase diversity and test cases where data index is not monotonically increasing.
                     train_data = train_data.sample(n=subsample_size, random_state=seed_val)  # subsample for fast_benchmark
             predictor = TabularPredictor(label=label, path=savedir).fit(train_data, **fit_args)
-            assert len(predictor._trainer._models_failed_to_train) == 0
+            assert len(predictor._trainer._models_failed_to_train_errors.keys()) == 0
             results = predictor.fit_summary(verbosity=4)
             original_features = list(train_data)
             original_features.remove(label)
@@ -923,7 +932,7 @@ def test_quantile():
     directory = directory_prefix + dataset["name"] + "/"
     savedir = directory + "AutogluonOutput/"
     shutil.rmtree(savedir, ignore_errors=True)  # Delete AutoGluon output directory to ensure previous runs' information has been removed.
-    fit_args = {"time_limit": 20}
+    fit_args = {"time_limit": 40}
     predictor = TabularPredictor(label=dataset["label"], path=savedir, problem_type=dataset["problem_type"], quantile_levels=quantile_levels).fit(
         train_data, **fit_args
     )
@@ -1143,7 +1152,8 @@ def test_tabular_log_to_file():
     predictor = TabularPredictor(label="class", log_to_file=True, log_file_path=log_file).fit(train_data=train_data, hyperparameters={"DUMMY": {}})
     log = TabularPredictor.load_log(log_file_path=log_file)
     assert "TabularPredictor saved." in log[-1]
-    os.remove(log_file)
+    if not on_windows:
+        os.remove(log_file)
 
     with pytest.raises(AssertionError):
         TabularPredictor.load_log()

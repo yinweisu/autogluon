@@ -101,12 +101,12 @@ class TabularPredictor:
             'roc_auc', 'roc_auc_ovo_macro', 'average_precision', 'precision', 'precision_macro', 'precision_micro',
             'precision_weighted', 'recall', 'recall_macro', 'recall_micro', 'recall_weighted', 'log_loss', 'pac_score']
         Options for regression:
-            ['root_mean_squared_error', 'mean_squared_error', 'mean_absolute_error', 'median_absolute_error', 'mean_absolute_percentage_error', 'r2']
+            ['root_mean_squared_error', 'mean_squared_error', 'mean_absolute_error', 'median_absolute_error', 'mean_absolute_percentage_error', 'r2', 'symmetric_mean_absolute_percentage_error']
         For more information on these options, see `sklearn.metrics`: https://scikit-learn.org/stable/modules/classes.html#sklearn-metrics-metrics
         For metric source code, see `autogluon.core.metrics`.
 
         You can also pass your own evaluation function here as long as it follows formatting of the functions defined in folder `autogluon.core.metrics`.
-        For detailed instructions on creating and using a custom metric, refer to https://auto.gluon.ai/stable/tutorials/tabular_prediction/tabular-custom-metric.html
+        For detailed instructions on creating and using a custom metric, refer to https://auto.gluon.ai/stable/tutorials/tabular/advanced/tabular-custom-metric.html
     path : Union[str, pathlib.Path], default = None
         Path to directory where models and intermediate outputs should be saved.
         If unspecified, a time-stamped folder called "AutogluonModels/ag-[TIMESTAMP]" will be created in the working directory to store all models.
@@ -387,7 +387,9 @@ class TabularPredictor:
         feature_metadata="infer",
         infer_limit=None,
         infer_limit_batch_size=None,
-        fit_weighted_ensemble=True,
+        fit_weighted_ensemble: bool = True,
+        fit_full_last_level_weighted_ensemble: bool = True,
+        full_weighted_ensemble_additionally: bool = False,
         calibrate_decision_threshold=False,
         num_cpus="auto",
         num_gpus="auto",
@@ -501,7 +503,7 @@ class TabularPredictor:
                 Some model types have preset hyperparameter configs keyed under strings as shorthand for a complex model hyperparameter configuration known to work well:
                     'GBM': ['GBMLarge']
             Advanced functionality: Bring your own model / Custom model support
-                AutoGluon fully supports custom models. For a detailed tutorial on creating and using custom models with AutoGluon, refer to https://auto.gluon.ai/stable/tutorials/tabular_prediction/tabular-custom-model.html
+                AutoGluon fully supports custom models. For a detailed tutorial on creating and using custom models with AutoGluon, refer to https://auto.gluon.ai/stable/tutorials/tabular/advanced/tabular-custom-model.html
             Advanced functionality: Custom stack levels
                 By default, AutoGluon re-uses the same models and model hyperparameters at each level during stack ensembling.
                 To customize this behaviour, create a hyperparameters dictionary separately for each stack level, and then add them as values to a new dictionary, with keys equal to the stack level.
@@ -546,7 +548,7 @@ class TabularPredictor:
                 XGB: `autogluon.tabular.models.xgboost.hyperparameters.parameters`
                      See also the XGBoost docs: https://xgboost.readthedocs.io/en/latest/parameter.html
                 FASTAI: `autogluon.tabular.models.fastainn.hyperparameters.parameters`
-                     See also the FastAI docs: https://docs.fast.ai/tabular.models.html
+                     See also the FastAI docs: https://docs.fast.ai/tabular.learner.html
                 RF: See sklearn documentation: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestClassifier.html
                     Note: Hyperparameter tuning is disabled for this model.
                 XT: See sklearn documentation: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.ExtraTreesClassifier.html
@@ -636,6 +638,14 @@ class TabularPredictor:
             If True, a WeightedEnsembleModel will be fit in each stack layer.
             A weighted ensemble will often be stronger than an individual model while being very fast to train.
             It is recommended to keep this value set to True to maximize predictive quality.
+        fit_full_last_level_weighted_ensemble : bool, default = True
+            If True, the WeightedEnsembleModel of the last stacking level will be fit with all (successful) models from all previous layers as base models.
+            If stacking is disabled, settings this to True or False makes no difference because the WeightedEnsembleModel L2 always uses all models from L1.
+            It is recommended to keep this value set to True to maximize predictive quality.
+        full_weighted_ensemble_additionally : bool, default = False
+            If True, AutoGluon will fit two WeightedEnsembleModels after training all stacking levels. Setting this to True, simulates calling
+            `fit_weighted_ensemble()` after calling `fit()`. Has no affect if `fit_full_last_level_weighted_ensemble` is False and does not fit an additional
+            WeightedEnsembleModel if stacking is disabled.
         calibrate_decision_threshold : bool, default = False
             [Experimental] This may be removed / changed without warning in a future release.
             If True, will automatically calibrate the decision threshold at the end of fit for calls to `.predict` based on the evaluation metric.
@@ -982,6 +992,8 @@ class TabularPredictor:
         aux_kwargs = {}
         if fit_weighted_ensemble is False:
             aux_kwargs["fit_weighted_ensemble"] = False
+        aux_kwargs["fit_full_last_level_weighted_ensemble"] = fit_full_last_level_weighted_ensemble
+        aux_kwargs["full_weighted_ensemble_additionally"] = full_weighted_ensemble_additionally
         self.save(silent=True)  # Save predictor to disk to enable prediction and training after interrupt
         self._learner.fit(
             X=train_data,
@@ -1024,6 +1036,10 @@ class TabularPredictor:
         calibrate_decision_threshold=False,
         infer_limit=None,
     ):
+        if not self.get_model_names():
+            logger.log(30, "Warning: No models found, skipping post_fit logic...")
+            return
+
         if refit_full is True:
             if keep_only_best is True:
                 if set_best_to_refit_full is True:
@@ -1039,23 +1055,16 @@ class TabularPredictor:
         if refit_full is not False:
             if infer_limit is not None:
                 infer_limit = infer_limit - self._learner.preprocess_1_time
-            trainer_model_best = self._trainer.get_model_best(infer_limit=infer_limit)
+            trainer_model_best = self._trainer.get_model_best(infer_limit=infer_limit, infer_limit_as_child=True)
             logger.log(20, "Automatically performing refit_full as a post-fit operation (due to `.fit(..., refit_full=True)`")
-            self.refit_full(model=refit_full, set_best_to_refit_full=False)
             if set_best_to_refit_full:
-                model_full_dict = self._trainer.get_model_full_dict()
-                if trainer_model_best in model_full_dict:
-                    self._trainer.model_best = model_full_dict[trainer_model_best]
-                    # Note: model_best will be overwritten if additional training is done with new models, since model_best will have validation score of None and any new model will have a better validation score.
-                    # This has the side-effect of having the possibility of model_best being overwritten by a worse model than the original model_best.
-                    self._trainer.save()
-                elif trainer_model_best in model_full_dict.values():
-                    self._trainer.model_best = trainer_model_best
-                    self._trainer.save()
-                else:
-                    logger.warning(
-                        f"Best model ({trainer_model_best}) is not present in refit_full dictionary. Training may have failed on the refit model. AutoGluon will default to using {trainer_model_best} for predictions."
-                    )
+                _set_best_to_refit_full = trainer_model_best
+            else:
+                _set_best_to_refit_full = False
+            if refit_full == "best":
+                self.refit_full(model=trainer_model_best, set_best_to_refit_full=_set_best_to_refit_full)
+            else:
+                self.refit_full(model=refit_full, set_best_to_refit_full=_set_best_to_refit_full)
 
         if calibrate == "auto":
             if self.problem_type in PROBLEM_TYPES_CLASSIFICATION and self.eval_metric.needs_proba:
@@ -1087,7 +1096,18 @@ class TabularPredictor:
             self.save_space()
 
     # TODO: Consider adding infer_limit to fit_extra
-    def fit_extra(self, hyperparameters, time_limit=None, base_model_names=None, fit_weighted_ensemble=True, num_cpus="auto", num_gpus="auto", **kwargs):
+    def fit_extra(
+        self,
+        hyperparameters,
+        time_limit=None,
+        base_model_names=None,
+        fit_weighted_ensemble=True,
+        fit_full_last_level_weighted_ensemble=True,
+        full_weighted_ensemble_additionally=False,
+        num_cpus="auto",
+        num_gpus="auto",
+        **kwargs,
+    ):
         """
         Fits additional models after the original :meth:`TabularPredictor.fit` call.
         The original train_data and tuning_data will be used to train the models.
@@ -1111,6 +1131,14 @@ class TabularPredictor:
             If True, a WeightedEnsembleModel will be fit in each stack layer.
             A weighted ensemble will often be stronger than an individual model while being very fast to train.
             It is recommended to keep this value set to True to maximize predictive quality.
+        fit_full_last_level_weighted_ensemble : bool, default = True
+            If True, the WeightedEnsembleModel of the last stacking level will be fit with all (successful) models from all previous layers as base models.
+            If stacking is disabled, settings this to True or False makes no difference because the WeightedEnsembleModel L2 always uses all models from L1.
+            It is recommended to keep this value set to True to maximize predictive quality.
+        full_weighted_ensemble_additionally : bool, default = False
+            If True, AutoGluon will fit two WeightedEnsembleModels after training all stacking levels. Setting this to True, simulates calling
+            `fit_weighted_ensemble()` after calling `fit()`. Has no affect if `fit_full_last_level_weighted_ensemble` is False and does not fit an additional
+            WeightedEnsembleModel if stacking is disabled.
         num_cpus: int, default = "auto"
             The total amount of cpus you want AutoGluon predictor to use.
             Auto means AutoGluon will make the decision based on the total number of cpus available and the model requirement for best performance.
@@ -1184,6 +1212,8 @@ class TabularPredictor:
         aux_kwargs = {}
         if fit_weighted_ensemble is False:
             aux_kwargs = {"fit_weighted_ensemble": False}
+        aux_kwargs["fit_full_last_level_weighted_ensemble"] = fit_full_last_level_weighted_ensemble
+        aux_kwargs["full_weighted_ensemble_additionally"] = full_weighted_ensemble_additionally
 
         if isinstance(hyperparameters, str):
             hyperparameters = get_hyperparameter_config(hyperparameters)
@@ -1382,7 +1412,7 @@ class TabularPredictor:
             test_pseudo_idxes = pd.Series(data=False, index=y_pred_proba.index)
             test_pseudo_idxes[test_pseudo_idxes_true.index] = True
 
-            y_pseudo_og = y_pseudo_og.append(y_pred.loc[test_pseudo_idxes_true.index], verify_integrity=True)
+            y_pseudo_og = pd.concat([y_pseudo_og, y_pred.loc[test_pseudo_idxes_true.index]], verify_integrity=True)
 
             pseudo_data = unlabeled_data.loc[y_pseudo_og.index]
             pseudo_data[self.label] = y_pseudo_og
@@ -1932,6 +1962,52 @@ class TabularPredictor:
             skip_score=skip_score,
             silent=silent,
         )
+
+    def get_model_failures(self, verbose: bool = False) -> pd.DataFrame:
+        """
+        [Advanced] Get the model failures that occurred during the fitting of this model, in the form of a pandas DataFrame.
+
+        This is useful for in-depth debugging of model failures and identifying bugs.
+
+        For more information on model failures, refer to `predictor.info()['model_info_failures']`
+
+        Parameters
+        ----------
+        verbose: bool, default = False
+            If True, the output DataFrame is printed to stdout.
+
+        Returns
+        -------
+        model_failures_df: pd.DataFrame
+            A DataFrame of model failures. Each row corresponds to a model failure, and columns correspond to meta information about that model.
+
+            Included Columns:
+                "model": The name of the model that failed
+                "exc_type": The class name of the exception raised
+                "total_time": The total time in seconds taken by the model prior to the exception (lost time due to the failure)
+                "model_type": The class name of the model
+                "child_model_type": The child class name of the model
+                "is_initialized"
+                "is_fit"
+                "is_valid"
+                "can_infer"
+                "num_features"
+                "num_models"
+                "memory_size"
+                "hyperparameters"
+                "hyperparameters_fit"
+                "child_hyperparameters"
+                "child_hyperparameters_fit"
+                "exc_str": The string message contained in the raised exception
+                "exc_traceback": The full traceback message of the exception as a string
+                "exc_order": The order of the model failure (starting from 1)
+        """
+        self._assert_is_fit("get_model_failures")
+        model_failures_df = self._trainer.get_model_failures()
+        if verbose:
+            with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 1000):
+                print(model_failures_df)
+        return model_failures_df
 
     def predict_proba_multi(
         self,
@@ -2593,10 +2669,11 @@ class TabularPredictor:
                 If 'best' then the model with the highest validation score is refit.
             All ancestor models will also be refit in the case that the selected model is a weighted or stacker ensemble.
             Valid models are listed in this `predictor` by calling `predictor.get_model_names()`.
-        set_best_to_refit_full : bool, default = True
+        set_best_to_refit_full : bool | str, default = True
             If True, sets best model to the refit_full version of the prior best model.
             This means the model used when `predictor.predict(data)` is called will be the refit_full version instead of the original version of the model.
             Ignored if `model` is not the best model.
+            If str, interprets as a model name and sets best model to the refit_full version of the model `set_best_to_refit_full`.
 
         Returns
         -------
@@ -2617,9 +2694,13 @@ class TabularPredictor:
         refit_full_dict = self._learner.refit_ensemble_full(model=model)
 
         if set_best_to_refit_full:
+            if isinstance(set_best_to_refit_full, str):
+                model_to_set_best = set_best_to_refit_full
+            else:
+                model_to_set_best = model_best
             model_full_dict = self._trainer.get_model_full_dict()
-            if model_best in model_full_dict:
-                self._trainer.model_best = model_full_dict[model_best]
+            if model_to_set_best in model_full_dict:
+                self._trainer.model_best = model_full_dict[model_to_set_best]
                 # Note: model_best will be overwritten if additional training is done with new models,
                 # since model_best will have validation score of None and any new model will have a better validation score.
                 # This has the side-effect of having the possibility of model_best being overwritten by a worse model than the original model_best.
@@ -2629,10 +2710,10 @@ class TabularPredictor:
                     f'Updated best model to "{self._trainer.model_best}" (Previously "{model_best}"). '
                     f'AutoGluon will default to using "{self._trainer.model_best}" for predict() and predict_proba().',
                 )
-            elif model_best in model_full_dict.values():
+            elif model_to_set_best in model_full_dict.values():
                 # Model best is already a refit full model
                 prev_best = self._trainer.model_best
-                self._trainer.model_best = model_best
+                self._trainer.model_best = model_to_set_best
                 self._trainer.save()
                 logger.log(
                     20,
@@ -2641,12 +2722,12 @@ class TabularPredictor:
                 )
             else:
                 logger.warning(
-                    f'Best model ("{model_best}") is not present in refit_full dictionary. '
+                    f'Best model ("{model_to_set_best}") is not present in refit_full dictionary. '
                     f'Training may have failed on the refit model. AutoGluon will default to using "{model_best}" for predict() and predict_proba().'
                 )
 
         te = time.time()
-        logger.log(20, f"Refit complete, total runtime = {round(te - ts, 2)}s")
+        logger.log(20, f'Refit complete, total runtime = {round(te - ts, 2)}s ... Best model: "{self._trainer.model_best}"')
         return refit_full_dict
 
     def get_model_best(self):
@@ -2724,7 +2805,7 @@ class TabularPredictor:
         Dictionary of `predictor` metadata.
         """
         self._assert_is_fit("info")
-        return self._learner.get_info(include_model_info=True)
+        return self._learner.get_info(include_model_info=True, include_model_failures=True)
 
     # TODO: Add data argument
     # TODO: Add option to disable OOF generation of newly fitted models
@@ -3359,7 +3440,7 @@ class TabularPredictor:
         $ sudo apt-get install graphviz graphviz-dev
         $ pip install pygraphviz
 
-        For other platforms, refer to https://graphviz.org/ for Graphviz install, and https://pygraphviz.github.io/documentation.html for PyGraphviz.
+        For other platforms, refer to https://graphviz.org/ for Graphviz install, and https://pygraphviz.github.io/ for PyGraphviz.
 
         Parameters
         ----------

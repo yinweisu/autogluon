@@ -1,5 +1,6 @@
 import logging
 import platform
+import sys
 from types import ModuleType
 
 from ..version import __version__
@@ -30,13 +31,13 @@ def try_import_mxboard():
 
 
 def try_import_ray() -> ModuleType:
-    RAY_MAX_VERSION = "2.4.0"
+    RAY_MAX_VERSION = "2.7.0"  # sync with core/setup.py
     ray_max_version_os_map = dict(
         Darwin=RAY_MAX_VERSION,
         Windows=RAY_MAX_VERSION,
         Linux=RAY_MAX_VERSION,
     )
-    ray_min_version = "2.2.0"
+    ray_min_version = "2.6.3"
     current_os = platform.system()
     ray_max_version = ray_max_version_os_map.get(current_os, RAY_MAX_VERSION)
     try:
@@ -53,10 +54,8 @@ def try_import_ray() -> ModuleType:
         return ray
     except ImportError:
         raise ImportError(
-            "ray is required to train folds in parallel. "
-            f"A quick tip is to install via `pip install ray=={ray_min_version}`, "
-            "or use sequential fold fitting by passing `sequential_local` to `ag_args_ensemble` when calling tabular.fit"
-            "For example: `predictor.fit(..., ag_args_ensemble={'fold_fitting_strategy': 'sequential_local'})`"
+            "ray is required to train folds in parallel for TabularPredictor or HPO for MultiModalPredictor. "
+            f"A quick tip is to install via `pip install ray=={ray_min_version}`"
         )
 
 
@@ -64,7 +63,12 @@ def try_import_catboost():
     try:
         import catboost
     except ImportError as e:
-        raise ImportError("`import catboost` failed. " f"A quick tip is to install via `pip install autogluon.tabular[catboost]=={__version__}`.")
+        error_msg = "`import catboost` failed. "
+        if sys.version_info >= (3, 11) and sys.platform == "darwin":
+            error_msg += f"Detected your env as {sys.platform}. Please either downgrade your python version to below 3.11 or move to another platform. Then install via ``pip install autogluon.tabular[catboost]=={__version__}``"
+        else:
+            error_msg += f"A quick tip is to install via `pip install autogluon.tabular[catboost]=={__version__}`."
+        raise ImportError()
     except ValueError as e:
         raise ImportError(
             "Import catboost failed. Numpy version may be outdated, "
@@ -124,7 +128,9 @@ def try_import_torch():
         import torch
     except ImportError as e:
         raise ImportError(
-            "Unable to import dependency torch\n" "A quick tip is to install via `pip install torch`.\n" "The minimum torch version is currently 1.6."
+            "Unable to import dependency torch\n"
+            "A quick tip is to install via `pip install torch`.\n"
+            "The minimum torch version is currently 2.0."  # sync with core/_setup_utils.py
         )
 
 

@@ -8,7 +8,6 @@ from autogluon.common import space
 from autogluon.core import constants
 
 from . import (
-    ARIMAModel,
     AutoARIMAModel,
     AutoETSModel,
     AverageModel,
@@ -26,10 +25,12 @@ from . import (
     SimpleFeedForwardModel,
     TemporalFusionTransformerModel,
     ThetaModel,
-    ThetaStatsmodelsModel,
 )
 from .abstract import AbstractTimeSeriesModel
 from .multi_window.multi_window_model import MultiWindowBacktestingModel
+
+# TODO: Enable ARIMAModel after upgrading to StatsForecast >=1.5.0 - currently ARIMA model is broken
+
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +54,17 @@ MODEL_TYPES = dict(
     DynamicOptimizedTheta=DynamicOptimizedThetaModel,
     NPTS=NPTSModel,
     Theta=ThetaModel,
-    ARIMA=ARIMAModel,
     ETS=ETSModel,
-    ThetaStatsmodels=ThetaStatsmodelsModel,
 )
 
 DEFAULT_MODEL_NAMES = {v: k for k, v in MODEL_TYPES.items()}
 DEFAULT_MODEL_PRIORITY = dict(
     Naive=100,
     SeasonalNaive=100,
+    Average=100,
+    SeasonalAverage=100,
     Theta=90,
+    NPTS=80,
     AutoETS=80,
     ETS=80,
     RecursiveTabular=70,
@@ -73,7 +75,6 @@ DEFAULT_MODEL_PRIORITY = dict(
     AutoARIMA=30,
     # Models below are not included in any presets
     ARIMA=30,
-    ThetaStatsmodels=90,
     SimpleFeedForward=30,
     DynamicOptimizedTheta=30,
 )
@@ -309,9 +310,9 @@ def verify_contains_at_least_one_searchspace(hyperparameters: Dict[str, List[Mod
                 return
 
     raise ValueError(
-        f"Hyperparameter tuning specified, but no model contains a hyperparameter search space. "
-        f"Please disable hyperparameter tuning with `hyperparameter_tune_kwargs=None` or provide a search space "
-        f"for at least one model."
+        "Hyperparameter tuning specified, but no model contains a hyperparameter search space. "
+        "Please disable hyperparameter tuning with `hyperparameter_tune_kwargs=None` or provide a search space "
+        "for at least one model."
     )
 
 

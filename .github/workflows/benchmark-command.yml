@@ -1,4 +1,5 @@
-name: Benchmark
+# Workflow to trigger benchmarking, cleaning, aggregation of the PR and evaluating w.r.t master branch, results on dashboard
+name: Benchmark Pull Request
 on:
   workflow_dispatch:
     inputs:
@@ -42,6 +43,12 @@ on:
       branch_or_pr_number:
         description: 'Branch or PR number to run the benchmark on'
         required: true
+      fork_name:
+        description: 'Get the forked PR repository name'
+        required: true
+      fork_branch:
+        description: 'Get the forked PR repository branch name'
+        required: true
       
 permissions:
   id-token: write
@@ -67,9 +74,27 @@ jobs:
             [Benchmark Output][1]
 
             [1]: ${{ steps.vars.outputs.run-url }}
+  
+  generate_amlb_user_dir:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Setup Env Vars
+        uses: ./.github/actions/setup-env-vars
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: arn:aws:iam::369469875935:role/AutoGluonCIBenchmarkConfig
+          role-duration-seconds: 3600
+          aws-region: us-east-1
+      - name: Generate AMLB User Dir
+        run: |
+          /bin/bash CI/bench/generate_amlb_user_dir.sh ${{ github.event.inputs.fork_name }} ${{ github.event.inputs.fork_branch }} ${{ github.sha }}
 
   benchmark:
-    needs: setup
+    needs: generate_amlb_user_dir
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -113,4 +138,54 @@ jobs:
         run: |
           nvm install 20
           npm install -g aws-cdk
-          /bin/bash ./.github/workflow_scripts/run_benchmark.sh ${{ github.event.inputs.module }} ${{ github.event.inputs.preset }} ${{ github.event.inputs.benchmark }} ${{ github.event.inputs.time_limit }} ${{ github.event.inputs.branch_or_pr_number }} ${{ github.event.inputs.pr-sha }}
+          /bin/bash ./.github/workflow_scripts/run_benchmark.sh ${{ github.event.inputs.module }} ${{ github.event.inputs.preset }} ${{ github.event.inputs.benchmark }} ${{ github.event.inputs.time_limit }} ${{ github.event.inputs.fork_branch }} ${{ github.sha }}
+      - name: Upload website.txt
+        uses: actions/upload-artifact@v3
+        with:
+          name: dashboard-website
+          path: ./website.txt
+      - name: Upload final_eval.txt
+        uses: actions/upload-artifact@v3
+        with:
+          name: evaluation-results
+          path: ./final_eval.txt       
+  
+  dashboard: 
+    needs: benchmark
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download final_eval.txt
+        uses: actions/download-artifact@v3
+        with:
+          name: evaluation-results
+      - name: get evaluation results
+        id: eval_result
+        run: |
+          body="$(cat final_eval.txt)"
+          echo ::set-output name=body::$body
+      - name: Comment Evaluation Result of PR with Master
+        uses: peter-evans/create-or-update-comment@v2.0.0
+        with:
+          token: ${{ secrets.PAT }}
+          repository: ${{ github.event.inputs.repository }}
+          comment-id: ${{ github.event.inputs.comment-id }}
+          body: ${{ steps.eval_result.outputs.body }}
+      - name: Download website.txt
+        uses: actions/download-artifact@v3
+        with:
+          name: dashboard-website
+      - name: get dashboard website
+        id: website
+        run: |
+          body="$(cat website.txt)"
+          echo ::set-output name=body::$body
+      - name: Comment Dashboard Website Link on PR
+        uses: peter-evans/create-or-update-comment@v2.0.0
+        with:
+          token: ${{ secrets.PAT }}
+          repository: ${{ github.event.inputs.repository }}
+          comment-id: ${{ github.event.inputs.comment-id }}
+          body: ${{ steps.website.outputs.body }}

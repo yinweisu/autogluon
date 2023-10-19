@@ -280,7 +280,7 @@ def get_pred_from_proba_df(y_pred_proba: pd.DataFrame, problem_type: str = BINAR
     return y_pred
 
 
-def get_pred_from_proba(y_pred_proba: np.ndarray, problem_type=BINARY, decision_threshold: float = None):
+def get_pred_from_proba(y_pred_proba: np.ndarray, problem_type: str = BINARY, decision_threshold: float = None) -> np.ndarray:
     if problem_type == BINARY:
         if decision_threshold is None:
             decision_threshold = 0.5
@@ -472,9 +472,24 @@ def generate_train_test_split(
                 y_split = y.drop(index=rare_indices)
                 stratify = y_split
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_split, y_split.values, test_size=test_size, shuffle=True, random_state=random_state, stratify=stratify
-    )
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_split, y_split.values, test_size=test_size, shuffle=True, random_state=random_state, stratify=stratify
+        )
+    except ValueError:
+        # This logic is necessary to avoid an edge-case limitation of scikit-learn's train_test_split function that leads to the following error:
+        #  ValueError: The test_size = FOO should be greater or equal to the number of classes = BAR
+        # When the number of classes is greater than the resulting number of test rows, and stratification is enabled, it will raise an exception.
+        #  Logically the code should still work, but for some reason scikit-learn doesn't allow this scenario.
+        #  To handle it without erroring, we disable stratification in this case. This isn't ideal, but proper solutions involve patching scikit-learn.
+        if stratify is None:
+            raise
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_split, y_split.values, test_size=test_size, shuffle=True, random_state=random_state, stratify=None
+        )
+        if len(y_test) >= len(y_split.unique()):
+            # This should never occur, otherwise the original exception is not an expected one
+            raise
     if problem_type != SOFTCLASS:
         y_train = pd.Series(y_train, index=X_train.index)
         y_test = pd.Series(y_test, index=X_test.index)

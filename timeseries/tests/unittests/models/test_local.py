@@ -6,7 +6,6 @@ import pytest
 
 from autogluon.timeseries import TimeSeriesDataFrame
 from autogluon.timeseries.models.local import (
-    ARIMAModel,
     AutoARIMAModel,
     AutoETSModel,
     AverageModel,
@@ -17,7 +16,6 @@ from autogluon.timeseries.models.local import (
     SeasonalAverageModel,
     SeasonalNaiveModel,
     ThetaModel,
-    ThetaStatsmodelsModel,
 )
 
 from ..common import (
@@ -32,14 +30,12 @@ TESTABLE_MODELS = [
     AutoETSModel,
     AverageModel,
     DynamicOptimizedThetaModel,
-    ARIMAModel,
     ETSModel,
     ThetaModel,
     NaiveModel,
     NPTSModel,
     SeasonalAverageModel,
     SeasonalNaiveModel,
-    ThetaStatsmodelsModel,
 ]
 
 
@@ -89,13 +85,7 @@ def test_when_local_model_predicts_then_time_index_is_correct(model_class, predi
 
 
 def get_seasonal_period_from_fitted_local_model(model):
-    if model.name == "ARIMA":
-        return model._local_model_args["seasonal_order"][-1]
-    elif model.name == "ETS":
-        return model._local_model_args["seasonal_periods"]
-    elif model.name == "ThetaStatsmodels":
-        return model._local_model_args["period"]
-    elif model.name in ["AutoETS", "AutoARIMA", "DynamicOptimizedTheta", "Theta"]:
+    if model.name in ["ARIMA", "AutoETS", "AutoARIMA", "DynamicOptimizedTheta", "ETS", "Theta"]:
         return model._local_model_args["season_length"]
     else:
         return model._local_model_args["seasonal_period"]
@@ -141,7 +131,7 @@ def test_when_seasonal_period_is_set_to_none_then_inferred_period_is_used(
         ("M", 100, 24),
     ],
 )
-def test_when_seasonal_period_is_provided_then_inferred_period_is_overriden(
+def test_when_seasonal_period_is_provided_then_inferred_period_is_overridden(
     model_class,
     temp_model_path,
     freqstr,
@@ -247,3 +237,32 @@ def test_when_data_shorter_than_seasonal_period_then_average_forecast_is_used():
     predictions_seasonal_avg = seasonal_avg.predict(DUMMY_TS_DATAFRAME)
 
     assert np.allclose(predictions_avg.values, predictions_seasonal_avg.values)
+
+
+@pytest.mark.parametrize("freq", ["H", "W", "D", "T", "S", "B", "Q", "M", "A"])
+def test_when_npts_fit_with_default_seasonal_features_then_predictions_match_gluonts(freq):
+    from gluonts.model.npts import NPTSPredictor
+
+    item_id = "A"
+    prediction_length = 9
+    data = get_data_frame_with_item_index([item_id], freq=freq, data_length=100)
+
+    npts_ag = NPTSModel(
+        freq=freq,
+        prediction_length=prediction_length,
+        hyperparameters={"n_jobs": 1, "use_fallback_model": False},
+    )
+    npts_gts = NPTSPredictor(freq=freq, prediction_length=prediction_length)
+    npts_ag.fit(train_data=data)
+
+    np.random.seed(123)
+    pred_ag = npts_ag.predict(data)
+
+    np.random.seed(123)
+    ts = data.loc[item_id]["target"]
+    ts.index = ts.index.to_period(freq=freq)
+    pred_gts = npts_gts.predict_time_series(ts, num_samples=100)
+
+    assert (pred_gts.mean == pred_ag["mean"]).all()
+    for q in npts_ag.quantile_levels:
+        assert (pred_gts.quantile(str(q)) == pred_ag[str(q)]).all()

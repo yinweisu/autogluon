@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import gc
 import inspect
@@ -7,38 +9,38 @@ import os
 import pickle
 import sys
 import time
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import scipy
 
 from autogluon.common.features.feature_metadata import FeatureMetadata
 from autogluon.common.utils.distribute_utils import DistributedContext
 from autogluon.common.utils.lite import disable_if_lite_mode
 from autogluon.common.utils.log_utils import DuplicateFilter
 from autogluon.common.utils.pandas_utils import get_approximate_df_mem_usage
-from autogluon.common.utils.path_converter import PathConverter
-from autogluon.common.utils.resource_utils import RayResourceManager, ResourceManager, get_resource_manager
+from autogluon.common.utils.resource_utils import ResourceManager, get_resource_manager
 from autogluon.common.utils.try_import import try_import_ray
 from autogluon.common.utils.utils import setup_outputdir
 
 from ... import metrics
+from ...calibrate.temperature_scaling import apply_temperature_scaling
 from ...constants import (
     AG_ARG_PREFIX,
     AG_ARGS_FIT,
     BINARY,
+    MULTICLASS,
     OBJECTIVES_TO_NORMALIZE,
     QUANTILE,
     REFIT_FULL_SUFFIX,
     REGRESSION,
+    SOFTCLASS,
 )
-from ...data.label_cleaner import LabelCleaner, LabelCleanerMulticlassToBinary
+from ...data.label_cleaner import LabelCleaner
 from ...hpo.constants import CUSTOM_BACKEND, RAY_BACKEND
 from ...hpo.exceptions import EmptySearchSpace
 from ...hpo.executors import HpoExecutor, HpoExecutorFactory
-from ...ray.resources_calculator import ResourceCalculator
-from ...scheduler import LocalSequentialScheduler
+from ...metrics import Scorer
 from ...utils import (
     compute_permutation_feature_importance,
     compute_weighted_metric,
@@ -101,8 +103,14 @@ class AbstractModel:
     model_info_name = "info.pkl"
     model_info_json_name = "info.json"
 
-    def __init__(self, path: str = None, name: str = None, problem_type: str = None, eval_metric: Union[str, metrics.Scorer] = None, hyperparameters=None):
-
+    def __init__(
+        self,
+        path: str = None,
+        name: str = None,
+        problem_type: str = None,
+        eval_metric: Union[str, metrics.Scorer] = None,
+        hyperparameters: dict = None,
+    ):
         if name is None:
             self.name = self.__class__.__name__
             logger.log(20, f"Warning: No name was specified for model, defaulting to class name: {self.name}")
@@ -120,6 +128,7 @@ class AbstractModel:
         self.path = self.create_contexts(os.path.join(self.path_root, self.path_suffix))  # TODO: Make this path a function for consistency.
 
         self.num_classes = None
+        self.quantile_levels = None
         self.model = None
         self.problem_type = problem_type
 
@@ -130,6 +139,7 @@ class AbstractModel:
             self.eval_metric = metrics.get_metric(eval_metric, self.problem_type, "eval_metric")  # Note: we require higher values = better performance
         else:
             self.eval_metric = None
+        self.stopping_metric = None
         self.normalize_pred_probas = None
 
         self.features = None  # External features, do not use internally
@@ -149,6 +159,7 @@ class AbstractModel:
         self.params = {}
         self.params_aux = {}
         self.params_trained = dict()
+        self.nondefault_params = []
         self._is_initialized = False
         self._is_fit_metadata_registered = False
         self._fit_metadata = dict()
@@ -249,7 +260,7 @@ class AbstractModel:
             self.params_aux.update(hyperparameters_aux)
 
     @property
-    def path_suffix(self):
+    def path_suffix(self) -> str:
         return self.name
 
     def is_valid(self) -> bool:
@@ -278,6 +289,11 @@ class AbstractModel:
     def can_fit(self) -> bool:
         """Returns True if the model can be fit."""
         return not self.is_fit()
+
+    def can_predict_proba(self) -> bool:
+        """Returns True if the model can predict probabilities."""
+        # TODO: v1.0: Enforce this by raising if `predict_proba` called when this is False.
+        return self.can_infer() and self.problem_type in [BINARY, MULTICLASS, SOFTCLASS]
 
     # TODO: v0.1 update to be aligned with _set_default_auxiliary_params(), add _get_default_params()
     def _set_default_params(self):
@@ -361,7 +377,7 @@ class AbstractModel:
         self.path_root = self.path.rsplit(self.path_suffix, 1)[0]
 
     @staticmethod
-    def create_contexts(path_context):
+    def create_contexts(path_context: str) -> str:
         path = path_context
         return path
 
@@ -373,7 +389,7 @@ class AbstractModel:
             self.path = os.path.join(self.path, name)
         self.name = name
 
-    def preprocess(self, X, preprocess_nonadaptive=True, preprocess_stateful=True, **kwargs):
+    def preprocess(self, X, preprocess_nonadaptive: bool = True, preprocess_stateful: bool = True, **kwargs):
         """
         Preprocesses the input data into internal form ready for fitting or inference.
         It is not recommended to override this method, as it is closely tied to multi-layer stacking logic. Instead, override `_preprocess`.
@@ -476,7 +492,7 @@ class AbstractModel:
         if error_if_no_features and not self._features_internal:
             raise NoValidFeatures
 
-    def _preprocess_fit_args(self, **kwargs):
+    def _preprocess_fit_args(self, **kwargs) -> dict:
         sample_weight = kwargs.get("sample_weight", None)
         if sample_weight is not None and isinstance(sample_weight, str):
             raise ValueError("In model.fit(), sample_weight should be array of sample weight values, not string.")
@@ -511,7 +527,7 @@ class AbstractModel:
         kwargs = self._preprocess_fit_resources(**kwargs)
         return kwargs
 
-    def initialize(self, **kwargs):
+    def initialize(self, **kwargs) -> dict:
         if not self._is_initialized:
             self._initialize(**kwargs)
             self._is_initialized = True
@@ -749,7 +765,7 @@ class AbstractModel:
             self._fit_metadata = self._compute_fit_metadata(**kwargs)
             self._is_fit_metadata_registered = True
 
-    def _compute_fit_metadata(self, X_val=None, X_unlabeled=None, **kwargs):
+    def _compute_fit_metadata(self, X_val: pd.DataFrame = None, X_unlabeled: pd.DataFrame = None, **kwargs) -> dict:
         fit_metadata = dict(val_in_fit=X_val is not None, unlabeled_in_fit=X_unlabeled is not None)
         return fit_metadata
 
@@ -857,7 +873,7 @@ class AbstractModel:
             self.predict_1_time = time_func(f=self.predict, args=[X_1]) / len(X_1)
         return self
 
-    def get_features(self):
+    def get_features(self) -> List[str]:
         assert self.is_fit(), "The model must be fit before calling the get_features method."
         if self.feature_metadata:
             return self.feature_metadata.get_features()
@@ -866,17 +882,17 @@ class AbstractModel:
 
     def _fit(
         self,
-        X,
-        y,
-        X_val=None,
-        y_val=None,
-        X_unlabeled=None,
-        time_limit=None,
-        sample_weight=None,
-        sample_weight_val=None,
-        num_cpus=None,
-        num_gpus=None,
-        verbosity=2,
+        X: pd.DataFrame,
+        y: pd.Series,
+        X_val: pd.DataFrame = None,
+        y_val: pd.Series = None,
+        X_unlabeled: pd.DataFrame = None,
+        time_limit: float = None,
+        sample_weight: pd.Series = None,
+        sample_weight_val: pd.Series = None,
+        num_cpus: int = None,
+        num_gpus: int = None,
+        verbosity: int = 2,
         **kwargs,
     ):
         """
@@ -895,21 +911,14 @@ class AbstractModel:
         X = self.preprocess(X)
         self.model = self.model.fit(X, y)
 
-    def _apply_temperature_scaling(self, y_pred_proba):
-        # TODO: This is expensive to convert at inference time, try to avoid in future
-        if self.problem_type == BINARY:
-            y_pred_proba = LabelCleanerMulticlassToBinary.convert_binary_proba_to_multiclass_proba(y_pred_proba)
+    def _apply_temperature_scaling(self, y_pred_proba: np.ndarray) -> np.ndarray:
+        return apply_temperature_scaling(
+            y_pred_proba=y_pred_proba,
+            temperature_scalar=self.params_aux.get("temperature_scalar"),
+            problem_type=self.problem_type,
+        )
 
-        logits = np.log(y_pred_proba)
-        y_pred_proba = scipy.special.softmax(logits / self.params_aux.get("temperature_scalar"), axis=1)
-        y_pred_proba = y_pred_proba / y_pred_proba.sum(axis=1, keepdims=True)
-
-        if self.problem_type == BINARY:
-            y_pred_proba = y_pred_proba[:, 1]
-
-        return y_pred_proba
-
-    def _apply_conformalization(self, y_pred):
+    def _apply_conformalization(self, y_pred: np.ndarray) -> np.ndarray:
         """
         Return conformalized quantile predictions
         This is applicable only to quantile regression problems,
@@ -918,7 +927,7 @@ class AbstractModel:
         y_pred += self.conformalize
         return y_pred
 
-    def predict(self, X, **kwargs):
+    def predict(self, X, **kwargs) -> np.ndarray:
         """
         Returns class predictions of X.
         For binary and multiclass problems, this returns the predicted class labels as a Series.
@@ -928,7 +937,7 @@ class AbstractModel:
         y_pred = get_pred_from_proba(y_pred_proba=y_pred_proba, problem_type=self.problem_type)
         return y_pred
 
-    def predict_proba(self, X, normalize=None, **kwargs):
+    def predict_proba(self, X, normalize=None, **kwargs) -> np.ndarray:
         """
         Returns class prediction probabilities of X.
         For binary problems, this returns the positive class label probability as a Series.
@@ -948,7 +957,31 @@ class AbstractModel:
             y_pred_proba = self._apply_conformalization(y_pred_proba)
         return y_pred_proba
 
-    def _predict_proba(self, X, **kwargs):
+    def predict_from_proba(self, y_pred_proba: np.ndarray) -> np.ndarray:
+        """
+        Convert prediction probabilities to predictions.
+
+        Parameters
+        ----------
+        y_pred_proba : np.ndarray
+            The prediction probabilities to be converted to predictions.
+
+        Returns
+        -------
+        y_pred : np.ndarray
+            The predictions obtained from `y_pred_proba`.
+
+        Examples
+        --------
+        >>> y_pred = predictor.predict(X)
+        >>> y_pred_proba = predictor.predict_proba(X)
+        >>>
+        >>> # Identical to y_pred
+        >>> y_pred_from_proba = predictor.predict_from_proba(y_pred_proba)
+        """
+        return get_pred_from_proba(y_pred_proba=y_pred_proba, problem_type=self.problem_type)
+
+    def _predict_proba(self, X, **kwargs) -> np.ndarray:
         X = self.preprocess(X, **kwargs)
 
         if self.problem_type in [REGRESSION, QUANTILE]:
@@ -958,7 +991,7 @@ class AbstractModel:
         y_pred_proba = self.model.predict_proba(X)
         return self._convert_proba_to_unified_form(y_pred_proba)
 
-    def _convert_proba_to_unified_form(self, y_pred_proba):
+    def _convert_proba_to_unified_form(self, y_pred_proba: np.ndarray) -> np.ndarray:
         """
         Ensures that y_pred_proba is in a consistent form across all models.
         For binary classification, converts y_pred_proba to a 1 dimensional array of prediction probabilities of the positive class.
@@ -982,7 +1015,7 @@ class AbstractModel:
         else:  # Unknown problem type
             raise AssertionError(f'Unknown y_pred_proba format for `problem_type="{self.problem_type}"`.')
 
-    def score(self, X, y, metric=None, sample_weight=None, **kwargs):
+    def score(self, X, y, metric=None, sample_weight=None, **kwargs) -> np.ndarray:
         if metric is None:
             metric = self.eval_metric
 
@@ -992,16 +1025,16 @@ class AbstractModel:
             y_pred = self.predict_proba(X=X, **kwargs)
         return compute_weighted_metric(y, y_pred, metric, sample_weight, quantile_levels=self.quantile_levels)
 
-    def score_with_y_pred_proba(self, y, y_pred_proba, metric=None, sample_weight=None):
+    def score_with_y_pred_proba(self, y, y_pred_proba: np.ndarray, metric=None, sample_weight=None) -> np.ndarray:
         if metric is None:
             metric = self.eval_metric
         if metric.needs_pred:
-            y_pred = get_pred_from_proba(y_pred_proba=y_pred_proba, problem_type=self.problem_type)
+            y_pred = self.predict_from_proba(y_pred_proba=y_pred_proba)
         else:
             y_pred = y_pred_proba
         return compute_weighted_metric(y, y_pred, metric, sample_weight, quantile_levels=self.quantile_levels)
 
-    def save(self, path: str = None, verbose=True) -> str:
+    def save(self, path: str = None, verbose: bool = True) -> str:
         """
         Saves the model to disk.
 
@@ -1037,7 +1070,7 @@ class AbstractModel:
         return path
 
     @classmethod
-    def load(cls, path: str, reset_paths=True, verbose=True):
+    def load(cls, path: str, reset_paths: bool = True, verbose: bool = True):
         """
         Loads the model from disk to memory.
 
@@ -1068,7 +1101,32 @@ class AbstractModel:
                 model.model = model._compiler.load(path=path)
         return model
 
-    def compute_feature_importance(self, X, y, features=None, silent=False, importance_as_list=False, **kwargs) -> pd.DataFrame:
+    # TODO: v1.0: Add docs
+    def compute_feature_importance(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        features: List[str] = None,
+        silent: bool = False,
+        importance_as_list: bool = False,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """
+        Compute feature importance via permutation shuffling.
+
+        Parameters
+        ----------
+        X
+        y
+        features
+        silent
+        importance_as_list
+        kwargs
+
+        Returns
+        -------
+        pd.DataFrame of feature importance
+        """
         if self.features is not None:
             X = X[self.features]
 
@@ -1110,7 +1168,15 @@ class AbstractModel:
     # Compute feature importance via permutation importance
     # Note: Expensive to compute
     #  Time to compute is O(predict_time*num_features)
-    def _compute_permutation_importance(self, X, y, features: list, eval_metric=None, silent=False, **kwargs) -> pd.DataFrame:
+    def _compute_permutation_importance(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        features: List[str],
+        eval_metric: Scorer = None,
+        silent: bool = False,
+        **kwargs,
+    ) -> pd.DataFrame:
         if eval_metric is None:
             eval_metric = self.eval_metric
         transform_func = self.preprocess
@@ -1134,7 +1200,7 @@ class AbstractModel:
             **kwargs,
         )
 
-    def can_compile(self, compiler_configs=None):
+    def can_compile(self, compiler_configs: dict = None) -> bool:
         """
         Verify whether the model can be compiled with the compiler configuration.
 
@@ -1160,7 +1226,7 @@ class AbstractModel:
                 return False
         return True
 
-    def compile(self, compiler_configs=None):
+    def compile(self, compiler_configs: dict = None):
         """
         Compile the trained model for faster inference.
 
@@ -1314,8 +1380,23 @@ class AbstractModel:
         return template
 
     def convert_to_refit_full_template(self):
-        """After calling this function, returned model should be able to be fit without X_val, y_val using the iterations trained by the original model."""
+        """
+        After calling this function, returned model should be able to be fit without X_val, y_val using the iterations trained by the original model.
+
+        Increase max_memory_usage_ratio by 25% to reduce the chance that the refit model will trigger NotEnoughMemoryError and skip training.
+        This can happen without the 25% increase since the refit model generally will use more training data and thus require more memory.
+        """
         params = copy.deepcopy(self.get_params())
+
+        if "hyperparameters" not in params:
+            params["hyperparameters"] = dict()
+
+        if AG_ARGS_FIT not in params["hyperparameters"]:
+            params["hyperparameters"][AG_ARGS_FIT] = dict()
+
+        # Increase memory limit by 25% to avoid memory restrictions during fit
+        params["hyperparameters"][AG_ARGS_FIT]["max_memory_usage_ratio"] = params["hyperparameters"][AG_ARGS_FIT].get("max_memory_usage_ratio", 1.0) * 1.25
+
         params["hyperparameters"].update(self.params_trained)
         params["name"] = params["name"] + REFIT_FULL_SUFFIX
         template = self.__class__(**params)
@@ -1376,7 +1457,7 @@ class AbstractModel:
                     Hyperparameter config of the model trial.
         hpo_info: Any
             Advanced output with scheduler specific logic, primarily for debugging.
-            In case of Ray Tune backend, this will be an Analysis object: https://docs.ray.io/en/latest/tune/api_docs/analysis.html
+            In case of Ray Tune backend, this will be an Analysis object: https://docs.ray.io/en/latest/tune/api/doc/ray.tune.ExperimentAnalysis.html
         """
         # if hpo_executor is not None, ensemble has already created the hpo_executor
         if hpo_executor is None:
@@ -1391,7 +1472,15 @@ class AbstractModel:
         hpo_executor.register_resources(self, **kwargs)
         return self._hyperparameter_tune(hpo_executor=hpo_executor, **kwargs)
 
-    def _hyperparameter_tune(self, X, y, X_val, y_val, hpo_executor, **kwargs):
+    def _hyperparameter_tune(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        X_val: pd.DataFrame,
+        y_val: pd.Series,
+        hpo_executor: HpoExecutor,
+        **kwargs,
+    ):
         """
         Hyperparameter tune the model.
 
@@ -1466,8 +1555,8 @@ class AbstractModel:
 
         return hpo_results
 
-    def _get_hpo_backend(self):
-        """Choose which backend(Ray or Custom) to use for hpo"""
+    def _get_hpo_backend(self) -> str:
+        """Choose which backend("ray" or "custom") to use for hpo"""
         if DistributedContext.is_distributed_mode():
             return RAY_BACKEND
         return CUSTOM_BACKEND
@@ -1510,11 +1599,37 @@ class AbstractModel:
         model_disk_size = sum(f.stat().st_size for f in model_path.glob("**/*") if f.is_file())
         return model_disk_size
 
-    # TODO: This results in a doubling of memory usage of the model to calculate its size.
-    #  If the model takes ~40%+ of memory, this may result in an OOM error.
-    #  This is generally not an issue because the model already needed to do this when being saved to disk, so the error would have been triggered earlier.
-    #  Consider using Pympler package for memory efficiency: https://pympler.readthedocs.io/en/latest/asizeof.html#asizeof
-    def get_memory_size(self) -> int:
+    def get_memory_size(self, allow_exception: bool = False) -> int | None:
+        """
+        Pickled the model object (self) and returns the size in bytes.
+        Will raise an exception if `self` cannot be pickled.
+
+        Note: This will temporarily double the memory usage of the model, as both the original and the pickled version will exist in memory.
+        This can lead to an out-of-memory error if the model is larger than the remaining available memory.
+
+        Parameters
+        ----------
+        allow_exception: bool, default = False
+            If True and an exception occurs during the memory size calculation, will return None instead of raising the exception.
+            For example, if a model failed during fit and had a messy internal state, and then `get_memory_size` was called,
+            it may still contain a non-serializable object. By setting `allow_exception=True`, we avoid crashing in this scenario.
+            For example: "AttributeError: Can't pickle local object 'func_generator.<locals>.custom_metric'"
+
+        Returns
+        -------
+        memory_size: int | None
+            The memory size in bytes of the pickled model object.
+            None if an exception occurred and `allow_exception=True`.
+        """
+        if allow_exception:
+            try:
+                return self._get_memory_size()
+            except:
+                return None
+        else:
+            return self._get_memory_size()
+
+    def _get_memory_size(self) -> int:
         gc.collect()  # Try to avoid OOM error
         return sys.getsizeof(pickle.dumps(self, protocol=4))
 
@@ -1550,11 +1665,11 @@ class AbstractModel:
             if resources[resource_name] > resource_value:
                 raise AssertionError(f"Specified {resources[resource_name]} {resource_name} to fit, but only {resource_value} are available in total.")
 
-    def get_minimum_resources(self, is_gpu_available=False) -> Dict[str, Union[int, float]]:
+    def get_minimum_resources(self, is_gpu_available: bool = False) -> Dict[str, Union[int, float]]:
         """
         Parameters
         ----------
-        is_gpu_available
+        is_gpu_available : bool, default = False
             Whether gpu is available in the system.
             Model that can be trained both on cpu and gpu can decide the minimum resources based on this.
 
@@ -1620,9 +1735,15 @@ class AbstractModel:
             return  # Model is smaller than the min threshold to check available mem
 
         available_mem = ResourceManager.get_available_virtual_mem()
-        ratio = approx_mem_size_req / available_mem
-        min_error_memory_ratio = ratio / mem_error_threshold
-        min_warning_memory_ratio = ratio / mem_warning_threshold
+
+        # The expected memory usage percentage of the model during fit
+        expected_memory_usage_ratio = approx_mem_size_req / available_mem
+
+        # The minimum `max_memory_usage_ratio` values required to avoid an error/warning
+        min_error_memory_ratio = expected_memory_usage_ratio / mem_error_threshold
+        min_warning_memory_ratio = expected_memory_usage_ratio / mem_warning_threshold
+
+        # The max allowed `expected_memory_usage_ratio` values to avoid an error/warning
         max_memory_usage_error_ratio = mem_error_threshold * max_memory_usage_ratio
         max_memory_usage_warning_ratio = mem_warning_threshold * max_memory_usage_ratio
 
@@ -1631,10 +1752,10 @@ class AbstractModel:
 
         log_user_guideline = (
             f"Estimated to require {approx_mem_size_req / 1e9:.3f} GB "
-            f"out of {available_mem / 1e9:.3f} GB available memory ({min_error_memory_ratio*100:.3f}%)... "
+            f"out of {available_mem / 1e9:.3f} GB available memory ({expected_memory_usage_ratio*100:.3f}%)... "
             f"({max_memory_usage_error_ratio*100:.3f}% of avail memory is the max safe size)"
         )
-        if min_error_memory_ratio > max_memory_usage_error_ratio:
+        if expected_memory_usage_ratio > max_memory_usage_error_ratio:
             log_user_guideline += (
                 f'\n\tTo force training the model, specify the model hyperparameter "ag.max_memory_usage_ratio" to a larger value '
                 f"(currently {max_memory_usage_ratio}, set to >={min_error_memory_ratio + 0.05:.2f} to avoid the error)"
@@ -1647,7 +1768,7 @@ class AbstractModel:
                 )
             logger.warning(f"\tWarning: Not enough memory to safely train model. {log_user_guideline}")
             raise NotEnoughMemoryError
-        elif min_warning_memory_ratio > max_memory_usage_warning_ratio:
+        elif expected_memory_usage_ratio > max_memory_usage_warning_ratio:
             log_user_guideline += (
                 f'\n\tTo avoid this warning, specify the model hyperparameter "ag.max_memory_usage_ratio" to a larger value '
                 f"(currently {max_memory_usage_ratio}, set to >={min_warning_memory_ratio + 0.05:.2f} to avoid the warning)"
@@ -1660,7 +1781,7 @@ class AbstractModel:
                 )
             logger.warning(f"\tWarning: Potentially not enough memory to safely train model. {log_user_guideline}")
 
-    def reduce_memory_size(self, remove_fit=True, remove_info=False, requires_save=True, **kwargs):
+    def reduce_memory_size(self, remove_fit: bool = True, remove_info: bool = False, requires_save: bool = True, **kwargs):
         """
         Removes non-essential objects from the model to reduce memory and disk footprint.
         If `remove_fit=True`, enables the removal of variables which are required for fitting the model. If the model is already fully trained, then it is safe to remove these.
@@ -1671,7 +1792,7 @@ class AbstractModel:
         """
         pass
 
-    def delete_from_disk(self, silent=False):
+    def delete_from_disk(self, silent: bool = False):
         """
         Deletes the model from disk.
 
@@ -1696,7 +1817,7 @@ class AbstractModel:
             "model_type": type(self).__name__,
             "problem_type": self.problem_type,
             "eval_metric": self.eval_metric.name,
-            "stopping_metric": self.stopping_metric.name,
+            "stopping_metric": self.stopping_metric.name if self.stopping_metric is not None else None,
             "fit_time": self.fit_time,
             "num_classes": self.num_classes,
             "quantile_levels": self.quantile_levels,
@@ -1710,13 +1831,17 @@ class AbstractModel:
             "features": self.features,
             "feature_metadata": self.feature_metadata,
             # 'disk_size': self.get_disk_size(),
-            "memory_size": self.get_memory_size(),  # Memory usage of model in bytes
+            "memory_size": self.get_memory_size(allow_exception=True),  # Memory usage of model in bytes
             "compile_time": self.compile_time if hasattr(self, "compile_time") else None,
+            "is_initialized": self.is_initialized(),
+            "is_fit": self.is_fit(),
+            "is_valid": self.is_valid(),
+            "can_infer": self.can_infer(),
         }
         return info
 
     @classmethod
-    def load_info(cls, path, load_model_if_required=True) -> dict:
+    def load_info(cls, path: str, load_model_if_required: bool = True) -> dict:
         load_path = os.path.join(path, cls.model_info_name)
         try:
             return load_pkl.load(path=load_path)
@@ -1749,7 +1874,7 @@ class AbstractModel:
         """
         return {}
 
-    def _get_default_resources(self):
+    def _get_default_resources(self) -> Tuple[int, int]:
         """
         Determines the default resource usage of the model during fit.
 
@@ -1775,7 +1900,7 @@ class AbstractModel:
         """
         return {}
 
-    def _get_default_stopping_metric(self):
+    def _get_default_stopping_metric(self) -> Scorer:
         """
         Returns the default stopping metric to use for early stopping.
         This is used if stopping_metric was not explicitly specified.
@@ -1831,7 +1956,7 @@ class AbstractModel:
         return set()
 
     @property
-    def _features(self):
+    def _features(self) -> List[str]:
         return self._features_internal
 
     def _get_tags(self) -> dict:

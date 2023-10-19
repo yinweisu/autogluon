@@ -1,4 +1,5 @@
 import logging
+import reprlib
 import time
 from typing import Any, Dict, List, Optional, Type, Union
 
@@ -8,6 +9,7 @@ from autogluon.core.learner import AbstractLearner
 from autogluon.timeseries.dataset.ts_dataframe import TimeSeriesDataFrame
 from autogluon.timeseries.evaluator import TimeSeriesEvaluator
 from autogluon.timeseries.models.abstract import AbstractTimeSeriesModel
+from autogluon.timeseries.splitter import AbstractWindowSplitter
 from autogluon.timeseries.trainer import AbstractTimeSeriesTrainer, AutoTimeSeriesTrainer
 from autogluon.timeseries.utils.features import TimeSeriesFeatureGenerator
 from autogluon.timeseries.utils.forecast import get_forecast_horizon_index_ts_dataframe
@@ -73,7 +75,8 @@ class TimeSeriesLearner(AbstractLearner):
         hyperparameters: Union[str, Dict] = None,
         hyperparameter_tune_kwargs: Optional[Union[str, dict]] = None,
         time_limit: Optional[int] = None,
-        num_val_windows: int = 1,
+        val_splitter: Optional[AbstractWindowSplitter] = None,
+        refit_every_n_windows: Optional[int] = 1,
         **kwargs,
     ) -> None:
         self._time_limit = time_limit
@@ -107,7 +110,8 @@ class TimeSeriesLearner(AbstractLearner):
                 verbosity=kwargs.get("verbosity", 2),
                 enable_ensemble=kwargs.get("enable_ensemble", True),
                 metadata=self.feature_generator.covariate_metadata,
-                num_val_windows=num_val_windows,
+                val_splitter=val_splitter,
+                refit_every_n_windows=refit_every_n_windows,
                 cache_predictions=self.cache_predictions,
             )
         )
@@ -149,7 +153,7 @@ class TimeSeriesLearner(AbstractLearner):
         missing_item_ids = data.item_ids.difference(known_covariates.item_ids)
         if len(missing_item_ids) > 0:
             raise ValueError(
-                f"known_covariates are missing information for the following item_ids: {missing_item_ids.to_list()}."
+                f"known_covariates are missing information for the following item_ids: {reprlib.repr(missing_item_ids.to_list())}."
             )
 
         forecast_index = get_forecast_horizon_index_ts_dataframe(data, prediction_length=self.prediction_length)

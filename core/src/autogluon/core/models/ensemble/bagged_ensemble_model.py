@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import inspect
 import logging
@@ -7,7 +9,7 @@ import platform
 import time
 from collections import Counter
 from statistics import mean
-from typing import Dict, Type, Union
+from typing import Dict, List, Type, Union
 
 import numpy as np
 import pandas as pd
@@ -84,7 +86,7 @@ class BaggedEnsembleModel(AbstractModel):
         self._bagged_mode = None
         # _child_oof currently is only set to True for KNN models, that are capable of LOO prediction generation to avoid needing bagging.
         # TODO: Consider moving `_child_oof` logic to a separate class / refactor OOF logic.
-        # FIXME: Avoid unnecessary refit during refit_full on `_child_oof=True` models, just re-use the original model.
+        # FIXME: Avoid unnecessary refit during refit_full on `_child_oof=True` models, just reuse the original model.
         self._child_oof = False  # Whether the OOF preds were taken from a single child model (Assumes child can produce OOF preds without bagging).
         self._cv_splitters = []  # Keeps track of the CV splitter used for each bagged repeat.
         self._params_aux_child = None  # aux params of child model
@@ -123,8 +125,8 @@ class BaggedEnsembleModel(AbstractModel):
         else:
             return True
 
-    def is_fit(self):
-        return len(self.models) != 0
+    def is_fit(self) -> bool:
+        return self.n_children != 0
 
     def can_fit(self) -> bool:
         if not self.is_fit():
@@ -134,6 +136,11 @@ class BaggedEnsembleModel(AbstractModel):
         # If max_sets is specified and the model has already fit >=max_sets, return False
         return self._get_model_params().get("max_sets", None) is None or self._get_model_params().get("max_sets") > self._n_repeats_finished
 
+    @property
+    def n_children(self) -> int:
+        """Returns the count of fitted children"""
+        return len(self.models)
+
     def is_valid_oof(self):
         return self.is_fit() and (self._child_oof or self._bagged_mode)
 
@@ -142,11 +149,11 @@ class BaggedEnsembleModel(AbstractModel):
         return self._oof_pred_proba_func(self._oof_pred_proba, self._oof_pred_model_repeats)
 
     @staticmethod
-    def _oof_pred_proba_func(oof_pred_proba, oof_pred_model_repeats):
+    def _oof_pred_proba_func(oof_pred_proba, oof_pred_model_repeats, return_type=np.float32):
         oof_pred_model_repeats_without_0 = np.where(oof_pred_model_repeats == 0, 1, oof_pred_model_repeats)
         if oof_pred_proba.ndim == 2:
             oof_pred_model_repeats_without_0 = oof_pred_model_repeats_without_0[:, None]
-        return oof_pred_proba / oof_pred_model_repeats_without_0
+        return (oof_pred_proba / oof_pred_model_repeats_without_0).astype(return_type)
 
     def _init_misc(self, **kwargs):
         child = self._get_model_base().convert_to_template()
@@ -340,6 +347,94 @@ class BaggedEnsembleModel(AbstractModel):
         if self._k is not None and self._k != k_fold:
             raise ValueError(f"k_fold must equal previously fit k_fold value for the current n_repeat, values: (({k_fold}, {self._k})")
 
+    def predict_proba_children(
+        self,
+        X: pd.DataFrame,
+        children_idx: List[int] = None,
+        normalize=None,
+        preprocess_nonadaptive: bool = True,
+        **kwargs,
+    ) -> List[np.ndarray]:
+        """
+        Returns the prediction probabilities for each child model
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            The input data to predict on
+        children_idx : List[int], default = None
+            The list of child indices to get results from, based on position in `self.models`.
+            The returned list will be in the order specified in `children_idx`.
+            If None, will predict with all children in `self.models` order.
+        normalize: bool, default = None
+            Whether to normalize the output.
+            If None, uses the model default.
+        preprocess_nonadaptive : bool, default = True
+            [Advanced] If False, assumes `X` has already been preprocessed in the non-adaptive stage and skips this preprocessing.
+        **kwargs :
+            Data preprocessing kwargs
+
+        Returns
+        -------
+        List of prediction probabilities for each child model.
+        """
+        if children_idx is None:
+            children_idx = list(range(self.n_children))
+        children = [self.models[index] for index in children_idx]
+        model = self.load_child(children[0])
+        if preprocess_nonadaptive:
+            X = self.preprocess(X, model=model, **kwargs)
+        pred_proba_children = []
+        pred_proba_children.append(model.predict_proba(X=X, preprocess_nonadaptive=False, normalize=normalize))
+        for model in children[1:]:
+            model = self.load_child(model)
+            pred_proba_children.append(model.predict_proba(X=X, preprocess_nonadaptive=False, normalize=normalize))
+        return pred_proba_children
+
+    def predict_children(
+        self,
+        X: pd.DataFrame,
+        children_idx: List[int] = None,
+        normalize=None,
+        preprocess_nonadaptive: bool = True,
+        **kwargs,
+    ) -> List[np.ndarray]:
+        """
+        Returns the predictions for each child model
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            The input data to predict on
+        children_idx : List[int], default = None
+            The list of child indices to get results from, based on position in `self.models`.
+            The returned list will be in the order specified in `children_idx`.
+            If None, will predict with all children in `self.models` order.
+        normalize: bool, default = None
+            Whether to normalize the output.
+            If None, uses the model default.
+        preprocess_nonadaptive : bool, default = True
+            [Advanced] If False, assumes `X` has already been preprocessed in the non-adaptive stage and skips this preprocessing.
+        **kwargs :
+            Data preprocessing kwargs
+
+        Returns
+        -------
+        List of predictions for each child model.
+        """
+        if children_idx is None:
+            children_idx = list(range(self.n_children))
+        children = [self.models[index] for index in children_idx]
+        model = self.load_child(children[0])
+        if preprocess_nonadaptive:
+            X = self.preprocess(X, model=model, **kwargs)
+        pred_children = []
+        pred_children.append(model.predict(X=X, preprocess_nonadaptive=False, normalize=normalize))
+        for model in children[1:]:
+            model = self.load_child(model)
+            pred_children.append(model.predict(X=X, preprocess_nonadaptive=False, normalize=normalize))
+        return pred_children
+
     def predict_proba(self, X, normalize=None, **kwargs):
         model = self.load_child(self.models[0])
         X = self.preprocess(X, model=model, **kwargs)
@@ -347,7 +442,7 @@ class BaggedEnsembleModel(AbstractModel):
         for model in self.models[1:]:
             model = self.load_child(model)
             pred_proba += model.predict_proba(X=X, preprocess_nonadaptive=False, normalize=normalize)
-        pred_proba = pred_proba / len(self.models)
+        pred_proba = pred_proba / self.n_children
 
         if self.params_aux.get("temperature_scalar", None) is not None:
             pred_proba = self._apply_temperature_scaling(pred_proba)
@@ -664,21 +759,57 @@ class BaggedEnsembleModel(AbstractModel):
     # TODO: Augment to generate OOF after shuffling each column in X (Batching), this is the fastest way.
     # TODO: Reduce logging clutter during OOF importance calculation (Currently logs separately for each child)
     # Generates OOF predictions from pre-trained bagged models, assuming X and y are in the same row order as used in .fit(X, y)
-    def compute_feature_importance(self, X, y, features=None, silent=False, time_limit=None, is_oof=False, **kwargs) -> pd.DataFrame:
+    def compute_feature_importance(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        features: List[str] = None,
+        silent: bool = False,
+        time_limit: float = None,
+        is_oof: bool = False,
+        from_children: bool = False,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """
+
+        Parameters
+        ----------
+        X: pd.DataFrame
+            The data to use for calculating feature importance.
+        y: pd.Series
+            The ground truth to use for calculating feature importance.
+        features: List[str], default = None,
+            The list of features to compute feature importances for.
+            If None, all features are computed.
+        silent: bool, default = False
+            If True, silences logs.
+        time_limit: float, default = None
+            If specified, will early stop shuffle set repeats when time limit would be exceeded.
+            If is_oof or from_children is True, the individual child models are processed one by one and early stopped if time limit would be exceeded.
+        is_oof: bool, default = False
+            If True, calculates feature importance for each child model on the out-of-fold indices, treating X as the original training data.
+        from_children: bool, default = False
+            If True, calculates feature importance for each child model without averaging child predictions.
+            If False, calculates feature importance for the bagged ensemble via averaging of the child predictions.
+        kwargs
+
+        Returns
+        -------
+        A pandas DataFrame of feature importances.
+        """
         if features is None:
             # FIXME: use FULL features (children can have different features)
             features = self.load_child(model=self.models[0]).features
-        if not is_oof:
+        if not is_oof and not from_children:
             return super().compute_feature_importance(X, y, features=features, time_limit=time_limit, silent=silent, **kwargs)
         fi_fold_list = []
         model_index = 0
-        num_children = len(self.models)
         if time_limit is not None:
-            time_limit_per_child = time_limit / num_children
+            time_limit_per_child = time_limit / self.n_children
         else:
             time_limit_per_child = None
         if not silent:
-            logging_message = f"Computing feature importance via permutation shuffling for {len(features)} features using out-of-fold (OOF) data aggregated across {num_children} child models..."
+            logging_message = f"Computing feature importance via permutation shuffling for {len(features)} features using out-of-fold (OOF) data aggregated across {self.n_children} child models..."
             if time_limit is not None:
                 logging_message = f"{logging_message} Time limit: {time_limit}s..."
             logger.log(20, logging_message)
@@ -714,7 +845,7 @@ class BaggedEnsembleModel(AbstractModel):
                 fi_fold_list.append(fi_fold)
 
                 children_completed += 1
-                if time_limit is not None and children_completed != num_children:
+                if time_limit is not None and children_completed != self.n_children:
                     time_now = time.time()
                     time_left = time_limit - (time_now - time_start)
                     time_child_average = (time_now - time_start) / children_completed
@@ -737,7 +868,8 @@ class BaggedEnsembleModel(AbstractModel):
 
         if not silent:
             logger.log(
-                20, f"\t{round(time.time() - time_start, 2)}s\t= Actual runtime (Completed {children_completed} of {num_children} children){log_final_suffix}"
+                20,
+                f"\t{round(time.time() - time_start, 2)}s\t= Actual runtime (Completed {children_completed} of {self.n_children} children){log_final_suffix}",
             )
 
         return fi_df
@@ -877,10 +1009,12 @@ class BaggedEnsembleModel(AbstractModel):
     def convert_to_template_child(self):
         return self._get_model_base().convert_to_template()
 
-    def _get_compressed_params(self, model_params_list=None):
+    def _get_compressed_params(self, model_params_list=None) -> dict:
         if model_params_list is None:
             model_params_list = [self.load_child(child).get_trained_params() for child in self.models]
 
+        if len(model_params_list) == 0:
+            return dict()
         model_params_compressed = dict()
         for param in model_params_list[0].keys():
             model_param_vals = [model_params[param] for model_params in model_params_list]
@@ -1078,7 +1212,7 @@ class BaggedEnsembleModel(AbstractModel):
             min_memory_size = info["memory_size"] - sum_memory_size_child + max_memory_size_child
 
         # Necessary if save_space is used as save_space deletes model_base.
-        if len(self.models) > 0:
+        if self.n_children > 0:
             child_model = self.load_child(self.models[0])
         else:
             child_model = self._get_model_base()
@@ -1087,7 +1221,7 @@ class BaggedEnsembleModel(AbstractModel):
 
         bagged_info = dict(
             child_model_type=self._child_type.__name__,
-            num_child_models=len(self.models),
+            num_child_models=self.n_children,
             child_model_names=self._get_model_names(),
             _n_repeats=self._n_repeats,
             # _n_repeats_finished=self._n_repeats_finished,  # commented out because these are too technical
@@ -1112,10 +1246,10 @@ class BaggedEnsembleModel(AbstractModel):
 
         return info
 
-    def get_memory_size(self):
+    def get_memory_size(self, allow_exception: bool = False) -> int | None:
         models = self.models
         self.models = None
-        memory_size = super().get_memory_size()
+        memory_size = super().get_memory_size(allow_exception=allow_exception)
         self.models = models
         return memory_size
 
@@ -1144,13 +1278,13 @@ class BaggedEnsembleModel(AbstractModel):
 
     def _construct_empty_oof(self, X, y):
         if self.problem_type == MULTICLASS:
-            oof_pred_proba = np.zeros(shape=(len(X), len(y.unique())), dtype=np.float32)
+            oof_pred_proba = np.zeros(shape=(len(X), len(y.unique())), dtype=np.float64)
         elif self.problem_type == SOFTCLASS:
-            oof_pred_proba = np.zeros(shape=y.shape, dtype=np.float32)
+            oof_pred_proba = np.zeros(shape=y.shape, dtype=np.float64)
         elif self.problem_type == QUANTILE:
-            oof_pred_proba = np.zeros(shape=(len(X), len(self.quantile_levels)), dtype=np.float32)
+            oof_pred_proba = np.zeros(shape=(len(X), len(self.quantile_levels)), dtype=np.float64)
         else:
-            oof_pred_proba = np.zeros(shape=len(X), dtype=np.float32)
+            oof_pred_proba = np.zeros(shape=len(X), dtype=np.float64)
         oof_pred_model_repeats = np.zeros(shape=len(X), dtype=np.uint8)
         return oof_pred_proba, oof_pred_model_repeats
 
