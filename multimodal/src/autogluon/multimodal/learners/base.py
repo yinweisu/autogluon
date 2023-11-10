@@ -416,7 +416,6 @@ class BaseLearner(ExportMixin, DistillationMixin, RealtimeMixin):
         tuning_data: Optional[Union[pd.DataFrame, str]],
         holdout_frac: Optional[float],
         seed: Optional[int],
-        f,
     ):
         if isinstance(train_data, str):
             train_data = load_pd.load(train_data)
@@ -589,6 +588,7 @@ class BaseLearner(ExportMixin, DistillationMixin, RealtimeMixin):
         strict_loading: Optional[bool] = True,
         standalone: Optional[bool] = True,
         clean_ckpts: Optional[bool] = True,
+        sync_path: Optional[str] = None,
     ):
         self._fit_called = True
         if not self._is_hpo:
@@ -674,6 +674,7 @@ class BaseLearner(ExportMixin, DistillationMixin, RealtimeMixin):
             strict_loading=fit_returns.get("strict_loading", True),
             standalone=standalone,
             clean_ckpts=clean_ckpts,
+            sync_path=sync_path,
         )
 
         return self
@@ -1557,7 +1558,7 @@ class BaseLearner(ExportMixin, DistillationMixin, RealtimeMixin):
                 self._model = create_fusion_model(
                     config=config,
                     num_classes=self._output_shape,
-                    classes=self._classes,
+                    classes=self._classes if hasattr(self, "_classes") else None,
                     num_numerical_columns=len(df_preprocessor.numerical_feature_names),
                     num_categories=df_preprocessor.categorical_num_categories,
                 )
